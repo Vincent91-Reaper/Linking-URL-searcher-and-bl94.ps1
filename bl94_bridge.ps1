@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
+# Stop at whitespace, HTML tag delimiters, or double quotes so copied panel text/HTML does not bleed into the URL.
 $serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*$serviceDomainsPattern(?:/[^\s<>`"]*)?"
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
@@ -82,7 +83,7 @@ while ($true) {
         }
 
         $nowUtc = [DateTime]::UtcNow
-        if ($nowUtc -ge $nextSeenUrlCleanupUtc) {
+        if ($seenUrls.Count -gt 0 -and $nowUtc -ge $nextSeenUrlCleanupUtc) {
             $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $nowUtc.Subtract($seenUrlExpiry) })
             foreach ($url in $expiredUrls) {
                 $seenUrls.Remove($url)
