@@ -147,6 +147,22 @@ function Get-PowerShellHostPath {
     return $null
 }
 
+function ConvertTo-ProcessArgumentString {
+    param([string[]]$Arguments)
+
+    $quotedArguments = foreach ($argument in $Arguments) {
+        if ($null -eq $argument) {
+            '""'
+        } elseif ($argument -notmatch '[\s"]' -and $argument.Length -gt 0) {
+            $argument
+        } else {
+            '"' + (($argument -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+        }
+    }
+
+    return ($quotedArguments -join ' ')
+}
+
 function Start-Bl94Process {
     param([string]$Url)
 
@@ -162,9 +178,7 @@ function Start-Bl94Process {
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $false
 
-    foreach ($argument in @('-NoProfile', '-File', $Bl94Path, '-InitialInput', $Url, '-Once')) {
-        [void]$startInfo.ArgumentList.Add($argument)
-    }
+    $startInfo.Arguments = ConvertTo-ProcessArgumentString @('-NoProfile', '-File', $Bl94Path, '-InitialInput', $Url, '-Once')
 
     return [System.Diagnostics.Process]::Start($startInfo)
 }
