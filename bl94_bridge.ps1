@@ -156,6 +156,7 @@ function ConvertTo-ProcessArgumentString {
         } elseif ($argument -notmatch '[\s"]' -and $argument.Length -gt 0) {
             $argument
         } else {
+            # Follow Windows command-line escaping rules: double backslashes before quotes and at the end of quoted arguments.
             '"' + (($argument -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
         }
     }
