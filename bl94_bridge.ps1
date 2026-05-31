@@ -7,8 +7,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
-# Stop at whitespace, HTML tag delimiters, or double quotes so copied panel text/HTML does not bleed into the URL.
-$serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*$serviceDomainsPattern(?:/[^\s<>`"]*)?"
+# Stop at whitespace, HTML tag delimiters, quotes, or backticks so copied panel text/HTML does not bleed into the URL.
+$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*' + $serviceDomainsPattern + '(?:/[^\s<>''`"]*)?'
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
 $nextSeenUrlCleanupUtc = [DateTime]::UtcNow.Add($seenUrlCleanupInterval)
@@ -51,9 +51,9 @@ function Get-MusicServiceUrlFromText {
     if (-not $match.Success) { return $null }
 
     $url = $match.Value
-    $url = Remove-UnmatchedTrailingDelimiter $url '(' ')'
-    $url = Remove-UnmatchedTrailingDelimiter $url '[' ']'
-    $url = Remove-UnmatchedTrailingDelimiter $url '{' '}'
+    foreach ($delimiterPair in @(@('(', ')'), @('[', ']'), @('{', '}'))) {
+        $url = Remove-UnmatchedTrailingDelimiter $url $delimiterPair[0] $delimiterPair[1]
+    }
 
     return $url
 }
@@ -84,7 +84,8 @@ while ($true) {
 
         $nowUtc = [DateTime]::UtcNow
         if ($seenUrls.Count -gt 0 -and $nowUtc -ge $nextSeenUrlCleanupUtc) {
-            $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $nowUtc.Subtract($seenUrlExpiry) })
+            $expirationThreshold = $nowUtc.Subtract($seenUrlExpiry)
+            $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold })
             foreach ($url in $expiredUrls) {
                 $seenUrls.Remove($url)
             }

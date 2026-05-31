@@ -239,7 +239,8 @@ function Run-UploadFlow {
 
     if ($InitialInput) {
         $linkInput = $InitialInput
-        Write-Host ("Using provided input (non-interactive): {0}" -f $linkInput) -ForegroundColor Cyan
+        $displayInput = $linkInput -replace '[\x00-\x1F\x7F]', '?'
+        Write-Host ("Using provided input (non-interactive): {0}" -f $displayInput) -ForegroundColor Cyan
     } else {
         $linkInput = Read-Bold 'Enter link or folder path'
     }
