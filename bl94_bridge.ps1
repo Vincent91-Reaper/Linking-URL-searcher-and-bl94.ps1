@@ -6,7 +6,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)(?:/[^\s<>"'']*)?'
+$serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)(?:/[^\s<>`"']*)?"
+$seenUrlExpiry = [TimeSpan]::FromHours(6)
 $lastClipboard = $null
 $seenUrls = @{}
 
@@ -18,7 +19,21 @@ function Get-MusicServiceUrlFromText {
     $match = [regex]::Match($Text, $serviceUrlPattern)
     if (-not $match.Success) { return $null }
 
-    return $match.Value.TrimEnd('.', ',', ';', ')', ']', '}')
+    $url = $match.Value.TrimEnd('.', ',', ';')
+
+    while ($url.EndsWith(')') -and (($url.ToCharArray() | Where-Object { $_ -eq ')' }).Count -gt ($url.ToCharArray() | Where-Object { $_ -eq '(' }).Count)) {
+        $url = $url.Substring(0, $url.Length - 1)
+    }
+
+    while ($url.EndsWith(']') -and (($url.ToCharArray() | Where-Object { $_ -eq ']' }).Count -gt ($url.ToCharArray() | Where-Object { $_ -eq '[' }).Count)) {
+        $url = $url.Substring(0, $url.Length - 1)
+    }
+
+    while ($url.EndsWith('}') -and (($url.ToCharArray() | Where-Object { $_ -eq '}' }).Count -gt ($url.ToCharArray() | Where-Object { $_ -eq '{' }).Count)) {
+        $url = $url.Substring(0, $url.Length - 1)
+    }
+
+    return $url
 }
 
 if (-not (Test-Path -LiteralPath $Bl94Path -PathType Leaf)) {
@@ -45,7 +60,7 @@ while ($true) {
             $lastClipboard = $clipboard
         }
 
-        $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt [DateTime]::UtcNow.AddHours(-6) })
+        $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt [DateTime]::UtcNow.Subtract($seenUrlExpiry) })
         foreach ($url in $expiredUrls) {
             $seenUrls.Remove($url)
         }
