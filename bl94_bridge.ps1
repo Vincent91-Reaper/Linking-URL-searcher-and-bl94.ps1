@@ -6,9 +6,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$serviceUrlPattern = '(?i)^https?://(?:www\.)?(?:qobuz\.com|tidal\.com|listen\.tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)/'
+$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)(?:/[^\s<>"'']*)?'
 $lastClipboard = $null
 $seenUrls = @{}
+
+function Get-MusicServiceUrlFromText {
+    param([string]$Text)
+
+    if (-not $Text) { return $null }
+
+    $match = [regex]::Match($Text, $serviceUrlPattern)
+    if (-not $match.Success) { return $null }
+
+    return $match.Value.TrimEnd('.', ',', ';', ')', ']', '}')
+}
 
 if (-not (Test-Path -LiteralPath $Bl94Path -PathType Leaf)) {
     throw "bl94.ps1 was not found at: $Bl94Path"
@@ -22,9 +33,9 @@ while ($true) {
     try {
         $clipboard = Get-Clipboard -Raw -ErrorAction SilentlyContinue
         if ($clipboard -and $clipboard -ne $lastClipboard) {
-            $candidate = $clipboard.Trim()
+            $candidate = Get-MusicServiceUrlFromText $clipboard
 
-            if ($candidate -match $serviceUrlPattern -and -not $seenUrls.ContainsKey($candidate)) {
+            if ($candidate -and -not $seenUrls.ContainsKey($candidate)) {
                 $seenUrls[$candidate] = [DateTime]::UtcNow
                 Write-Host ("[Bridge] Sending URL to bl94: {0}" -f $candidate) -ForegroundColor Green
                 & $Bl94Path -InitialInput $candidate -Once
