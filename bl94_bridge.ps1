@@ -11,6 +11,33 @@ $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $lastClipboard = $null
 $seenUrls = @{}
 
+function Remove-UnmatchedTrailingDelimiter {
+    param(
+        [string]$Value,
+        [char]$OpenDelimiter,
+        [char]$CloseDelimiter
+    )
+
+    if (-not $Value) { return $Value }
+
+    $openCount = 0
+    $closeCount = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq $OpenDelimiter) {
+            $openCount += 1
+        } elseif ($ch -eq $CloseDelimiter) {
+            $closeCount += 1
+        }
+    }
+
+    while ($Value.EndsWith([string]$CloseDelimiter) -and $closeCount -gt $openCount) {
+        $Value = $Value.Substring(0, $Value.Length - 1)
+        $closeCount -= 1
+    }
+
+    return $Value
+}
+
 function Get-MusicServiceUrlFromText {
     param([string]$Text)
 
@@ -20,18 +47,9 @@ function Get-MusicServiceUrlFromText {
     if (-not $match.Success) { return $null }
 
     $url = $match.Value.TrimEnd('.', ',', ';')
-
-    while ($url.EndsWith(')') -and (($url.ToCharArray() | Where-Object { $_ -eq ')' }).Count -gt ($url.ToCharArray() | Where-Object { $_ -eq '(' }).Count)) {
-        $url = $url.Substring(0, $url.Length - 1)
-    }
-
-    while ($url.EndsWith(']') -and (($url.ToCharArray() | Where-Object { $_ -eq ']' }).Count -gt ($url.ToCharArray() | Where-Object { $_ -eq '[' }).Count)) {
-        $url = $url.Substring(0, $url.Length - 1)
-    }
-
-    while ($url.EndsWith('}') -and (($url.ToCharArray() | Where-Object { $_ -eq '}' }).Count -gt ($url.ToCharArray() | Where-Object { $_ -eq '{' }).Count)) {
-        $url = $url.Substring(0, $url.Length - 1)
-    }
+    $url = Remove-UnmatchedTrailingDelimiter $url '(' ')'
+    $url = Remove-UnmatchedTrailingDelimiter $url '[' ']'
+    $url = Remove-UnmatchedTrailingDelimiter $url '{' '}'
 
     return $url
 }
