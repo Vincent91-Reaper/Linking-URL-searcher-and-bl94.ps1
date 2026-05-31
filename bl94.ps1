@@ -239,7 +239,7 @@ function Run-UploadFlow {
 
     if ($InitialInput) {
         $linkInput = $InitialInput
-        # Keep copied URLs from writing control characters into the console.
+        # Replace control characters before displaying copied URLs in the console.
         $displayInput = $linkInput -replace '[\x00-\x1F\x7F]', '?'
         Write-Host ("Using provided input (non-interactive): {0}" -f $displayInput) -ForegroundColor Cyan
     } else {

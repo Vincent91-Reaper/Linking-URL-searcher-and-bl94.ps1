@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 
 $serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
 # Stop at whitespace, HTML tag delimiters, quotes, or backticks so copied panel text/HTML does not bleed into the URL.
-$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*{0}(?:/[^\s<>''`"]*)?' -f $serviceDomainsPattern
+$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*{0}(?:/[^\s<>\x27\x60"]*)?' -f $serviceDomainsPattern
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
 $nextSeenUrlCleanupUtc = [DateTime]::UtcNow.Add($seenUrlCleanupInterval)
@@ -86,7 +86,7 @@ while ($true) {
         $nowUtc = [DateTime]::UtcNow
         if ($seenUrls.Count -gt 0 -and $nowUtc -ge $nextSeenUrlCleanupUtc) {
             $expirationThreshold = $nowUtc.Subtract($seenUrlExpiry)
-            $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold })
+            [string[]]$expiredUrls = $seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold }
             foreach ($url in $expiredUrls) {
                 $seenUrls.Remove($url)
             }
