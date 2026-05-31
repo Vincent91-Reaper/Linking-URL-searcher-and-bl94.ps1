@@ -6,7 +6,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$serviceUrlPattern = '(?i)^https?://(?:www\.)?(?:qobuz\.com|tidal\.com|listen\.tidal\.com|deezer\.com|beatport\.com|music\.apple\.com|apple\.com)/'
+$serviceUrlPattern = '(?i)^https?://(?:www\.)?(?:qobuz\.com|tidal\.com|listen\.tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)/'
 $lastClipboard = $null
 $seenUrls = @{}
 
@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $Bl94Path -PathType Leaf)) {
     throw "bl94.ps1 was not found at: $Bl94Path"
 }
 
-Write-Host 'RED Purchase Links -> bl94 bridge is running.' -ForegroundColor Yellow
+Write-Host 'Music service URL -> bl94 bridge is running.' -ForegroundColor Yellow
 Write-Host 'Copy a Qobuz, Tidal, Deezer, Apple Music, or Beatport URL to start bl94 automatically.' -ForegroundColor Yellow
 Write-Host 'Press Ctrl+C to stop.' -ForegroundColor Yellow
 
