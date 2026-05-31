@@ -19,6 +19,8 @@
 // @connect listen.tidal.com
 // @connect www.beatport.com
 // @connect api.beatport.com
+// @connect 127.0.0.1
+// @connect localhost
 // ==/UserScript==
 
 (() => {
@@ -52,6 +54,7 @@
 
   const DEBUG_RED_PURCHASE_LINKS = false;
   const DEBUG_TOP_CANDIDATES = 8;
+  const BL94_BRIDGE_ENDPOINT = "http://127.0.0.1:17894/bridge-url";
 
   const PANEL_LEFT = "200px";
   const PANEL_TOP = "350px";
@@ -366,6 +369,28 @@
       `Copied ${esc(serviceLabel)} URL to clipboard<br><span style="font-size:14px;color:#ddd;font-weight:600;">${esc(url)}</span>`,
       "#7CFC90"
     );
+    sendBridgeUrl(serviceLabel, url);
+  };
+
+  const sendBridgeUrl = (serviceLabel, url) => {
+    if (!url) return;
+
+    try {
+      GM.xmlHttpRequest({
+        method: "POST",
+        url: BL94_BRIDGE_ENDPOINT,
+        headers: { "Content-Type": "application/json" },
+        data: JSON.stringify({
+          source: "RED Purchase Links first panel",
+          serviceLabel,
+          url
+        }),
+        timeout: 1500,
+        onload: () => {},
+        onerror: () => {},
+        ontimeout: () => {}
+      });
+    } catch {}
   };
 
   const copyNow = (serviceLabel, url) => {
