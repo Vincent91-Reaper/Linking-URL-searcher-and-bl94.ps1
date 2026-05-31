@@ -238,12 +238,12 @@ function Run-UploadFlow {
     }
 
     if ($InitialInput) {
-        $input = $InitialInput
-        Write-Host ("Enter link or folder path: {0}" -f $input) -ForegroundColor Cyan
+        $linkInput = $InitialInput
+        Write-Host ("Enter link or folder path: {0}" -f $linkInput) -ForegroundColor Cyan
     } else {
-        $input = Read-Bold 'Enter link or folder path'
+        $linkInput = Read-Bold 'Enter link or folder path'
     }
-    if (-not $input) { Write-Host 'No input provided. Aborting.' -ForegroundColor Red; return }
+    if (-not $linkInput) { Write-Host 'No input provided. Aborting.' -ForegroundColor Red; return }
 
     $albumFolder = $null
     $url = $null
@@ -253,30 +253,30 @@ function Run-UploadFlow {
     $shouldUpload = $false
 
     try {
-        if (Test-Path -LiteralPath $input -PathType Container) {
+        if (Test-Path -LiteralPath $linkInput -PathType Container) {
             $choice = '5'
-            $albumFolder = (Resolve-Path -LiteralPath $input).ProviderPath
+            $albumFolder = (Resolve-Path -LiteralPath $linkInput).ProviderPath
         }
     } catch {}
 
     if (-not $choice) {
-        if ($input -match '(?i)deezer') {
+        if ($linkInput -match '(?i)deezer') {
             $choice = '6'
-            $url = $input
+            $url = $linkInput
             $isDeezer = $true
-        } elseif ($input -match '(?i)qobuz') {
+        } elseif ($linkInput -match '(?i)qobuz') {
             $choice = '1'
-            $url = $input
+            $url = $linkInput
             $isQobuz = $true
-        } elseif ($input -match '(?i)beatport') {
+        } elseif ($linkInput -match '(?i)beatport') {
             $choice = '2'
-            $url = $input
-        } elseif ($input -match '(?i)music\.apple\.com|apple\.com') {
+            $url = $linkInput
+        } elseif ($linkInput -match '(?i)music\.apple\.com|apple\.com') {
             $choice = '3'
-            $url = $input
-        } elseif ($input -match '(?i)tidal|listen\.tidal') {
+            $url = $linkInput
+        } elseif ($linkInput -match '(?i)tidal|listen\.tidal') {
             $choice = '4'
-            $url = $input
+            $url = $linkInput
         } else {
             Write-Host 'Which tool do you want to use?' -ForegroundColor Yellow
             Write-Host '1 = Qobuz-cli (Qobuz only)' -ForegroundColor Yellow
