@@ -34,10 +34,9 @@ while ($true) {
             $lastClipboard = $clipboard
         }
 
-        foreach ($url in @($seenUrls.Keys)) {
-            if ($seenUrls[$url] -lt [DateTime]::UtcNow.AddHours(-6)) {
-                $seenUrls.Remove($url)
-            }
+        $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt [DateTime]::UtcNow.AddHours(-6) })
+        foreach ($url in $expiredUrls) {
+            $seenUrls.Remove($url)
         }
     } catch {
         Write-Host ("[Bridge] {0}" -f $_) -ForegroundColor Red
