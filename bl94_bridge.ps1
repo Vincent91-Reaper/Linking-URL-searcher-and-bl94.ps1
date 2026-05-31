@@ -8,10 +8,11 @@ $ErrorActionPreference = 'Stop'
 
 $serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
 # Stop at whitespace, HTML tag delimiters, quotes, or backticks so copied panel text/HTML does not bleed into the URL.
-$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*' + $serviceDomainsPattern + '(?:/[^\s<>''`"]*)?'
+$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*{0}(?:/[^\s<>''`"]*)?' -f $serviceDomainsPattern
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
 $nextSeenUrlCleanupUtc = [DateTime]::UtcNow.Add($seenUrlCleanupInterval)
+$trailingDelimiterPairs = @(@('(', ')'), @('[', ']'), @('{', '}'))
 $lastClipboard = $null
 $seenUrls = @{}
 
@@ -51,7 +52,7 @@ function Get-MusicServiceUrlFromText {
     if (-not $match.Success) { return $null }
 
     $url = $match.Value
-    foreach ($delimiterPair in @(@('(', ')'), @('[', ']'), @('{', '}'))) {
+    foreach ($delimiterPair in $trailingDelimiterPairs) {
         $url = Remove-UnmatchedTrailingDelimiter $url $delimiterPair[0] $delimiterPair[1]
     }
 
