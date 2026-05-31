@@ -239,7 +239,7 @@ function Run-UploadFlow {
 
     if ($InitialInput) {
         $linkInput = $InitialInput
-        # Replace all control characters before display so copied multi-line or escape-sequence text stays on one safe console line.
+        # Replace ASCII control characters (0-31 and DEL) before display so copied multi-line or escape-sequence text stays on one safe console line.
         $displayInput = $linkInput -replace '[\x00-\x1F\x7F]', '?'
         Write-Host ("Using provided input (non-interactive): {0}" -f $displayInput) -ForegroundColor Cyan
     } else {

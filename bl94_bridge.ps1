@@ -7,9 +7,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
-# Stop at whitespace, HTML tag delimiters, quotes, or backticks so copied panel text/HTML does not bleed into the URL.
-# Use hex escapes for single quote/backtick to keep the PowerShell string quoting unambiguous.
-$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*{0}(?:/[^\s<>\x27\x60"]*)?' -f $serviceDomainsPattern
+# Stop at whitespace, HTML tag delimiters, double quotes, or backticks so copied panel text/HTML does not bleed into the URL.
+# Use a hex escape for the backtick to keep the PowerShell string quoting unambiguous.
+$serviceUrlPattern = '(?i)https?://(?:[A-Za-z0-9-]+\.)*{0}(?:/[^\s<>\x60"]*)?' -f $serviceDomainsPattern
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
 $nextSeenUrlCleanupUtc = [DateTime]::UtcNow.Add($seenUrlCleanupInterval)
@@ -87,8 +87,7 @@ while ($true) {
         $nowUtc = [DateTime]::UtcNow
         if ($seenUrls.Count -gt 0 -and $nowUtc -ge $nextSeenUrlCleanupUtc) {
             $expirationThreshold = $nowUtc.Subtract($seenUrlExpiry)
-            [string[]]$expiredUrls = $seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold }
-            foreach ($url in $expiredUrls) {
+            foreach ($url in ($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold })) {
                 $seenUrls.Remove($url)
             }
             $nextSeenUrlCleanupUtc = $nowUtc.Add($seenUrlCleanupInterval)
