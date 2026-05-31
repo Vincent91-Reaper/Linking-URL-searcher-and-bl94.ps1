@@ -6,8 +6,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)(?:/[^\s<>`"']*)?"
+$serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
+$serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*$serviceDomainsPattern(?:/[^\s<>`"']*)?"
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
+$seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
+$nextSeenUrlCleanupUtc = [DateTime]::UtcNow.Add($seenUrlCleanupInterval)
 $lastClipboard = $null
 $seenUrls = @{}
 
@@ -78,9 +81,13 @@ while ($true) {
             $lastClipboard = $clipboard
         }
 
-        $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt [DateTime]::UtcNow.Subtract($seenUrlExpiry) })
-        foreach ($url in $expiredUrls) {
-            $seenUrls.Remove($url)
+        $nowUtc = [DateTime]::UtcNow
+        if ($nowUtc -ge $nextSeenUrlCleanupUtc) {
+            $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $nowUtc.Subtract($seenUrlExpiry) })
+            foreach ($url in $expiredUrls) {
+                $seenUrls.Remove($url)
+            }
+            $nextSeenUrlCleanupUtc = $nowUtc.Add($seenUrlCleanupInterval)
         }
     } catch {
         Write-Host ("[Bridge] {0}" -f $_) -ForegroundColor Red

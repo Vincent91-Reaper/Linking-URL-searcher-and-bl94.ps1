@@ -239,7 +239,7 @@ function Run-UploadFlow {
 
     if ($InitialInput) {
         $linkInput = $InitialInput
-        Write-Host ("Enter link or folder path: {0}" -f $linkInput) -ForegroundColor Cyan
+        Write-Host ("Using provided link or folder path: {0}" -f $linkInput) -ForegroundColor Cyan
     } else {
         $linkInput = Read-Bold 'Enter link or folder path'
     }
