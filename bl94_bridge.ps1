@@ -147,13 +147,6 @@ function Get-PowerShellHostPath {
     return $null
 }
 
-function Quote-CommandLineArgument {
-    param([string]$Value)
-
-    if ($null -eq $Value) { return '""' }
-    return '"{0}"' -f ($Value -replace '"', '\"')
-}
-
 function Start-Bl94Process {
     param([string]$Url)
 
@@ -162,24 +155,26 @@ function Start-Bl94Process {
         throw 'Could not find pwsh or powershell to launch bl94.ps1.'
     }
 
-    $arguments = @(
-        '-NoProfile',
-        '-File',
-        (Quote-CommandLineArgument $Bl94Path),
-        '-InitialInput',
-        (Quote-CommandLineArgument $Url),
-        '-Once'
-    )
-
     Write-Host ("[Bridge] Starting bl94 for URL: {0}" -f $Url) -ForegroundColor Green
-    return Start-Process -FilePath $powerShellHost -ArgumentList $arguments -NoNewWindow -PassThru
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powerShellHost
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $false
+
+    foreach ($argument in @('-NoProfile', '-File', $Bl94Path, '-InitialInput', $Url, '-Once')) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    return [System.Diagnostics.Process]::Start($startInfo)
 }
 
 function Invoke-SeenUrlCleanup {
     $nowUtc = [DateTime]::UtcNow
     if ($seenUrls.Count -gt 0 -and $nowUtc -ge $script:nextSeenUrlCleanupUtc) {
         $expirationThreshold = $nowUtc.Subtract($seenUrlExpiry)
-        foreach ($url in ($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold })) {
+        $expiredUrls = @($seenUrls.Keys | Where-Object { $seenUrls[$_] -lt $expirationThreshold })
+        foreach ($url in $expiredUrls) {
             $seenUrls.Remove($url)
         }
         $script:nextSeenUrlCleanupUtc = $nowUtc.Add($seenUrlCleanupInterval)
@@ -238,7 +233,6 @@ try {
         }
     }
 } finally {
-    if ($contextTask) { $contextTask.Dispose() }
     if ($listener.IsListening) { $listener.Stop() }
     $listener.Close()
 }
