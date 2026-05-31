@@ -1,3 +1,8 @@
+param(
+    [string]$InitialInput = $null,
+    [switch]$Once
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -234,6 +239,7 @@ function Run-UploadFlow {
 
     if ($InitialInput) {
         $input = $InitialInput
+        Write-Host ("Enter link or folder path: {0}" -f $input) -ForegroundColor Cyan
     } else {
         $input = Read-Bold 'Enter link or folder path'
     }
@@ -474,13 +480,14 @@ node cli.js dl '$urlEscForBash' 2>&1 | tee /tmp/deemix-cli.run.log
     }
 }
 
-$nextInput = $null
+$nextInput = $InitialInput
 while ($true) {
     try {
         Run-UploadFlow -InitialInput $nextInput
     } catch {
         Write-Host 'Unhandled error:' $_ -ForegroundColor Red
     }
+    if ($Once) { break }
     $nextInput = Read-Bold 'Enter a folder path or URL'
     if (-not $nextInput) { break }
 }
