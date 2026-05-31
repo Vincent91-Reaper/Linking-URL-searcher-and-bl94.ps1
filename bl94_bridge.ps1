@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $serviceDomainsPattern = '(?:qobuz\.com|tidal\.com|deezer\.com|beatport\.com|music\.apple\.com)'
-$serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*$serviceDomainsPattern(?:/[^\s<>`"']*)?"
+$serviceUrlPattern = "(?i)https?://(?:[A-Za-z0-9-]+\.)*$serviceDomainsPattern(?:/[^\s<>`"]*)?"
 $seenUrlExpiry = [TimeSpan]::FromHours(6)
 $seenUrlCleanupInterval = [TimeSpan]::FromMinutes(1)
 $nextSeenUrlCleanupUtc = [DateTime]::UtcNow.Add($seenUrlCleanupInterval)
@@ -49,7 +49,7 @@ function Get-MusicServiceUrlFromText {
     $match = [regex]::Match($Text, $serviceUrlPattern)
     if (-not $match.Success) { return $null }
 
-    $url = $match.Value.TrimEnd('.', ',', ';')
+    $url = $match.Value
     $url = Remove-UnmatchedTrailingDelimiter $url '(' ')'
     $url = Remove-UnmatchedTrailingDelimiter $url '[' ']'
     $url = Remove-UnmatchedTrailingDelimiter $url '{' '}'
