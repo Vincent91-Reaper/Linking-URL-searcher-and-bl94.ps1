@@ -224,7 +224,18 @@ function Brucelee-Upload {
 
 function Resize-FLAC-Artwork {
     param([string]$albumFolder)
-    python resize_flac_cover.py "$albumFolder"
+
+    $scriptDir = $PSScriptRoot
+    if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
+    $resizeScript = Join-Path $scriptDir 'resize_flac_cover.py'
+
+    if (-not (Test-Path -LiteralPath $resizeScript -PathType Leaf)) {
+        Write-Host "resize_flac_cover.py not found at $resizeScript. Aborting resize." -ForegroundColor Red
+        $global:LASTEXITCODE = 2
+        return
+    }
+
+    & python $resizeScript "$albumFolder"
 }
 
 function Run-UploadFlow {
