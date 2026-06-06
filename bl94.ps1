@@ -20,6 +20,7 @@ $BruceleeUpBaseFlags = @('-s','WEB')
 # ---------------------------------------------------------------------------
 
 $script:IntroShown = $false
+$script:ResizeFlacArtworkExitCode = 0
 
 function Read-Bold {
     param([string]$Message)
@@ -225,17 +226,19 @@ function Brucelee-Upload {
 function Resize-FLAC-Artwork {
     param([string]$albumFolder)
 
+    $script:ResizeFlacArtworkExitCode = 0
     $scriptDir = $PSScriptRoot
     if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
     $resizeScript = Join-Path $scriptDir 'resize_flac_cover.py'
 
     if (-not (Test-Path -LiteralPath $resizeScript -PathType Leaf)) {
         Write-Host "resize_flac_cover.py not found at $resizeScript. Aborting resize." -ForegroundColor Red
-        $global:LASTEXITCODE = 2
+        $script:ResizeFlacArtworkExitCode = 2
         return
     }
 
     & python $resizeScript "$albumFolder"
+    $script:ResizeFlacArtworkExitCode = $LASTEXITCODE
 }
 
 function Run-UploadFlow {
@@ -370,7 +373,7 @@ function Run-UploadFlow {
             }
 
             Resize-FLAC-Artwork $albumFolder
-            $resizeExit = $LASTEXITCODE
+            $resizeExit = $script:ResizeFlacArtworkExitCode
             if ($resizeExit -ne 0) {
                 Write-Host "resize_flac_cover.py returned non-zero exit code $resizeExit. Aborting upload." -ForegroundColor Yellow
                 $shouldUpload = $false
