@@ -386,7 +386,7 @@ function Run-UploadFlow {
         '3' {
             if (-not $url) { Write-Host 'No URL provided. Aborting.' -ForegroundColor Red; return }
             $dlStartUtc = [DateTime]::UtcNow
-            $cmd = "cd ~/downloader; ./main '" + ($url -replace "'","'\''") + "'"
+            $cmd = "cd ~/downloader; go run main.go"
             & wsl -- bash -lc $cmd
 
             $albumFolder = Get-NewAlbumFolderSince -StartUtc $dlStartUtc -TimeoutSeconds 3
