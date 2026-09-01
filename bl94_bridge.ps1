@@ -108,7 +108,7 @@ function Get-RequestBody {
     }
 }
 
-function Parse-BridgeSentTimestamp {
+function Parse-BridgeTimestamp {
     param([string]$Value)
 
     if (-not $Value) { return $null }
@@ -149,8 +149,8 @@ function Get-BridgePayloadFromRequest {
             $payload.Source = [string]$json.source
             $payload.SendSource = [string]$json.sendSource
             $payload.ServiceLabel = [string]$json.serviceLabel
-            $payload.SentAtUtc = Parse-BridgeSentTimestamp ([string]$json.sentAtUtc)
-            $payload.FirstSeenAtUtc = Parse-BridgeSentTimestamp ([string]$json.firstSeenAtUtc)
+            $payload.SentAtUtc = Parse-BridgeTimestamp ([string]$json.sentAtUtc)
+            $payload.FirstSeenAtUtc = Parse-BridgeTimestamp ([string]$json.firstSeenAtUtc)
             if ($null -ne $json.attemptIndex -and ([string]$json.attemptIndex -match '^\d+$')) {
                 $payload.AttemptIndex = [int]$json.attemptIndex
             }

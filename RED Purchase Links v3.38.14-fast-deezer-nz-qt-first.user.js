@@ -367,6 +367,7 @@
   const BRIDGE_RETRY_DELAYS_MS = [150, 500, 1200];
   const BRIDGE_PENDING_RETRY_GUARD_MS = 10000;
   const BRIDGE_WATCHDOG_INTERVAL_MS = 3000;
+  const BRIDGE_GM_FALLBACK_DELAY_MS = 250;
   const BRIDGE_DEBUG = true;
   const bridgeSendState = new Map();
   const bridgePendingSince = new Map();
@@ -456,32 +457,34 @@
       url: normalizedUrl
     };
 
-    const transports = [
-      postBridgeViaFetch(payload),
-      postBridgeViaGm(payload)
-    ];
-
     let finished = false;
-    let failureCount = 0;
-    const neededFailures = transports.length;
+    let fetchSettled = false;
+    let gmSettled = false;
+    let gmStarted = false;
 
-    const onFailure = (result) => {
+    const maybeScheduleRetry = () => {
       if (finished) return;
-      failureCount += 1;
+      if (!fetchSettled) return;
+      if (gmStarted && !gmSettled) return;
+      finished = true;
+      scheduleRetry();
+    };
+
+    const onFailure = (result, transportName) => {
+      if (finished) return;
       bridgeDebugLog("attempt-failure", {
         source: sourceTag,
         label: serviceLabel,
         url: normalizedUrl,
         attemptIndex,
-        transport: result.transport || "unknown",
+        transport: transportName || result.transport || "unknown",
         statusCode: Number(result.statusCode || 0),
         error: result.error || "",
         durationMs: Date.now() - startedAtMs
       });
-      if (failureCount >= neededFailures) {
-        finished = true;
-        scheduleRetry();
-      }
+      if (transportName === "fetch") fetchSettled = true;
+      if (transportName === "gm") gmSettled = true;
+      maybeScheduleRetry();
     };
 
     const onSuccess = (result) => {
@@ -501,16 +504,38 @@
       });
     };
 
-    for (const transportPromise of transports) {
-      transportPromise
+    const startGmFallback = () => {
+      if (finished || gmStarted) return;
+      gmStarted = true;
+      postBridgeViaGm(payload)
         .then((result) => {
           if (result?.ok) onSuccess(result);
-          else onFailure(result || { transport: "unknown", error: "empty-result" });
+          else onFailure(result || { transport: "gm", error: "empty-result" }, "gm");
         })
         .catch((error) => {
-          onFailure({ transport: "unknown", error: String(error || "transport-exception") });
+          onFailure({ transport: "gm", error: String(error || "transport-exception") }, "gm");
         });
-    }
+    };
+
+    setTimeout(() => {
+      if (finished || fetchSettled) return;
+      bridgeDebugLog("starting-gm-fallback", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex });
+      startGmFallback();
+    }, BRIDGE_GM_FALLBACK_DELAY_MS);
+
+    postBridgeViaFetch(payload)
+      .then((result) => {
+        if (result?.ok) {
+          onSuccess(result);
+          return;
+        }
+        onFailure(result || { transport: "fetch", error: "empty-result" }, "fetch");
+        startGmFallback();
+      })
+      .catch((error) => {
+        onFailure({ transport: "fetch", error: String(error || "transport-exception") }, "fetch");
+        startGmFallback();
+      });
   };
 
   const sendBridgeUrl = (serviceLabel, url, sourceTag = "unknown") => {
