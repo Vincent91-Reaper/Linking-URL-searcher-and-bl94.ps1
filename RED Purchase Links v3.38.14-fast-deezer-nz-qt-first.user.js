@@ -364,6 +364,7 @@
 
   const beatportSearchUrl = (artist, titleNoYearStr) =>
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
+  const BRIDGE_GM_FALLBACK_DELAY_MS = 300;
 
   const getBridgeFirstSeenAtUtc = (serviceLabel, url) => {
     const label = String(serviceLabel || "URL");
@@ -397,18 +398,58 @@
       url: normalizedUrl
     };
 
+    const payloadText = JSON.stringify(payload);
+    let gmFallbackDispatched = false;
+    let gmFallbackTimer = null;
+
+    const dispatchGmFallback = () => {
+      if (gmFallbackDispatched) return;
+      gmFallbackDispatched = true;
+
+      try {
+        GM.xmlHttpRequest({
+          method: "POST",
+          url: BL94_BRIDGE_ENDPOINT,
+          headers: { "Content-Type": "application/json" },
+          data: payloadText,
+          timeout: 1500,
+          onload: () => {},
+          onerror: () => {},
+          ontimeout: () => {}
+        });
+      } catch {}
+    };
+
     try {
-      GM.xmlHttpRequest({
+      gmFallbackTimer = setTimeout(dispatchGmFallback, BRIDGE_GM_FALLBACK_DELAY_MS);
+
+      fetch(BL94_BRIDGE_ENDPOINT, {
         method: "POST",
-        url: BL94_BRIDGE_ENDPOINT,
-        headers: { "Content-Type": "application/json" },
-        data: JSON.stringify(payload),
-        timeout: 1500,
-        onload: () => {},
-        onerror: () => {},
-        ontimeout: () => {}
-      });
-    } catch {}
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: payloadText,
+        keepalive: true
+      })
+        .then(() => {
+          if (gmFallbackTimer) {
+            clearTimeout(gmFallbackTimer);
+            gmFallbackTimer = null;
+          }
+        })
+        .catch(() => {
+          if (gmFallbackTimer) {
+            clearTimeout(gmFallbackTimer);
+            gmFallbackTimer = null;
+          }
+          dispatchGmFallback();
+        });
+    } catch {
+      if (gmFallbackTimer) {
+        clearTimeout(gmFallbackTimer);
+        gmFallbackTimer = null;
+      }
+      dispatchGmFallback();
+    }
   };
 
   const copyNow = (serviceLabel, url) => {
@@ -2187,6 +2228,8 @@
       let q = desc.qobuz, t = desc.tidal, d = desc.deezer, b = desc.beatport;
       let deezerLabel = "Deezer";
       const count = [q, t, d, b].filter(Boolean).length;
+
+      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
 
       // Description Beatport links trump all other logic.
       // If the RED request description already contains a Beatport URL,
