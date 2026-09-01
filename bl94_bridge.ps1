@@ -18,6 +18,7 @@ $trailingDelimiterPairs = @(@('(', ')'), @('[', ']'), @('{', '}'))
 $seenUrls = @{}
 $queuedUrls = [System.Collections.Queue]::new()
 $activeBl94 = $null
+$activeBridgeItem = $null
 
 function Remove-UnmatchedTrailingDelimiter {
     param(
@@ -107,27 +108,64 @@ function Get-RequestBody {
     }
 }
 
-function Get-UrlFromBridgeRequest {
+function Parse-BridgeSentTimestamp {
+    param([string]$Value)
+
+    if (-not $Value) { return $null }
+
+    $parsed = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($Value, [ref]$parsed)) {
+        return $parsed.UtcDateTime
+    }
+
+    return $null
+}
+
+function Get-BridgePayloadFromRequest {
     param([System.Net.HttpListenerRequest]$Request)
 
     $body = Get-RequestBody $Request
-    if (-not $body) { return $null }
+    $payload = [ordered]@{
+        Url         = $null
+        Source      = ''
+        SendSource  = ''
+        ServiceLabel = ''
+        SentAtUtc   = $null
+        AttemptIndex = $null
+        RawBodyLength = ($body | ForEach-Object { [string]$_ }).Length
+    }
+
+    if (-not $body) {
+        return [pscustomobject]$payload
+    }
 
     $contentType = [string]$Request.ContentType
     if ($contentType -match '(?i)application/json') {
         try {
-            $payload = $body | ConvertFrom-Json
-            return Get-MusicServiceUrlFromText ([string]$payload.url)
+            $json = $body | ConvertFrom-Json
+            $payload.Url = Get-MusicServiceUrlFromText ([string]$json.url)
+            $payload.Source = [string]$json.source
+            $payload.SendSource = [string]$json.sendSource
+            $payload.ServiceLabel = [string]$json.serviceLabel
+            $payload.SentAtUtc = Parse-BridgeSentTimestamp ([string]$json.sentAtUtc)
+            if ($null -ne $json.attemptIndex -and ([string]$json.attemptIndex -match '^\d+$')) {
+                $payload.AttemptIndex = [int]$json.attemptIndex
+            }
+            return [pscustomobject]$payload
         } catch {
-            return $null
+            $payload.Url = $null
+            return [pscustomobject]$payload
         }
     }
 
-    return Get-MusicServiceUrlFromText $body
+    $payload.Url = Get-MusicServiceUrlFromText $body
+    return [pscustomobject]$payload
 }
 
 function Add-BridgeUrl {
-    param([string]$Url)
+    param([pscustomobject]$Payload)
+
+    $Url = [string]$Payload.Url
 
     if (-not $Url) { return 'ignored' }
     if ($seenUrls.ContainsKey($Url)) { return 'duplicate' }
@@ -142,7 +180,8 @@ function Add-BridgeUrl {
         }
     }
 
-    $queuedUrls.Enqueue($Url)
+    $payload.EnqueuedUtc = [DateTime]::UtcNow
+    $queuedUrls.Enqueue($payload)
     return 'queued'
 }
 
@@ -231,25 +270,53 @@ try {
                     } elseif ($context.Request.HttpMethod -ne 'POST' -or $context.Request.Url.AbsolutePath -ne '/bridge-url') {
                         Write-BridgeResponse $context 404 (ConvertTo-JsonResponse 'not_found' 'Use POST /bridge-url.')
                     } else {
-                        $candidate = Get-UrlFromBridgeRequest $context.Request
-                        $queueStatus = Add-BridgeUrl $candidate
+                        $receivedUtc = [DateTime]::UtcNow
+                        $bridgePayload = Get-BridgePayloadFromRequest $context.Request
+                        $queueStatus = Add-BridgeUrl $bridgePayload
                         Write-BridgeResponse $context 200 (ConvertTo-JsonResponse $queueStatus $queueStatus)
 
-                        if ($queueStatus -eq 'queued') {
-                            Write-Host ("[Bridge] Queued URL from RED Purchase Links first panel: {0}" -f $candidate) -ForegroundColor Green
+                        $receiveLagMs = $null
+                        if ($bridgePayload.SentAtUtc) {
+                            $receiveLagMs = [int][Math]::Round($receivedUtc.Subtract($bridgePayload.SentAtUtc).TotalMilliseconds)
                         }
+
+                        $attemptLabel = if ($null -ne $bridgePayload.AttemptIndex) { [string]$bridgePayload.AttemptIndex } else { '-' }
+                        $lagLabel = if ($null -ne $receiveLagMs) { "$receiveLagMs ms" } else { 'n/a' }
+                        $activeState = if ($activeBl94) { 'busy' } else { 'idle' }
+
+                        Write-Host ("[Bridge][recv {0}] status={1} active={2} queue={3} service={4} sendSource={5} attempt={6} lag={7} url={8}" -f $receivedUtc.ToString('HH:mm:ss.fff'), $queueStatus, $activeState, $queuedUrls.Count, $bridgePayload.ServiceLabel, $bridgePayload.SendSource, $attemptLabel, $lagLabel, $bridgePayload.Url) -ForegroundColor Cyan
                     }
                 } while ($contextTask.AsyncWaitHandle.WaitOne(0))
             }
 
             if ($activeBl94 -and $activeBl94.HasExited) {
-                Write-Host ("[Bridge] bl94 exited with code {0}." -f $activeBl94.ExitCode) -ForegroundColor Yellow
+                if ($activeBridgeItem) {
+                    Write-Host ("[Bridge][done {0}] exit={1} url={2}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss.fff')), $activeBl94.ExitCode, $activeBridgeItem.Url) -ForegroundColor Yellow
+                } else {
+                    Write-Host ("[Bridge][done {0}] exit={1}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss.fff')), $activeBl94.ExitCode) -ForegroundColor Yellow
+                }
                 $activeBl94.Dispose()
                 $activeBl94 = $null
+                $activeBridgeItem = $null
             }
 
             if (-not $activeBl94 -and $queuedUrls.Count -gt 0) {
-                $nextUrl = [string]$queuedUrls.Dequeue()
+                $nextItem = $queuedUrls.Dequeue()
+                $nextUrl = [string]$nextItem.Url
+                $activeBridgeItem = $nextItem
+
+                $startLagMs = $null
+                if ($nextItem.SentAtUtc) {
+                    $startLagMs = [int][Math]::Round(([DateTime]::UtcNow).Subtract($nextItem.SentAtUtc).TotalMilliseconds)
+                }
+                $queueWaitMs = $null
+                if ($nextItem.EnqueuedUtc) {
+                    $queueWaitMs = [int][Math]::Round(([DateTime]::UtcNow).Subtract($nextItem.EnqueuedUtc).TotalMilliseconds)
+                }
+                $startLagLabel = if ($null -ne $startLagMs) { "$startLagMs ms" } else { 'n/a' }
+                $queueWaitLabel = if ($null -ne $queueWaitMs) { "$queueWaitMs ms" } else { 'n/a' }
+                Write-Host ("[Bridge][start {0}] queueWait={1} totalLag={2} url={3}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss.fff')), $queueWaitLabel, $startLagLabel, $nextUrl) -ForegroundColor Green
+
                 $activeBl94 = Start-Bl94Process $nextUrl
             }
 

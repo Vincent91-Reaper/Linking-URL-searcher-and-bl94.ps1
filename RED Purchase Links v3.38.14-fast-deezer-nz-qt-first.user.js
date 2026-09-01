@@ -367,23 +367,35 @@
   const BRIDGE_RETRY_DELAYS_MS = [150, 500, 1200];
   const BRIDGE_PENDING_RETRY_GUARD_MS = 10000;
   const BRIDGE_WATCHDOG_INTERVAL_MS = 3000;
+  const BRIDGE_DEBUG = true;
   const bridgeSendState = new Map();
   const bridgePendingSince = new Map();
   const bridgeSendKey = (serviceLabel, url) => `${serviceLabel}\u0000${url}`;
+  const bridgeNowIso = () => new Date().toISOString();
+  const bridgeDebugLog = (...args) => {
+    if (!BRIDGE_DEBUG) return;
+    console.log("[RED Purchase Links][bridge-debug]", ...args);
+  };
 
-  const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, attemptIndex) => {
+  const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, sourceTag, attemptIndex) => {
+    const startedAtMs = Date.now();
+
     const scheduleRetry = () => {
       const retryDelayMs = BRIDGE_RETRY_DELAYS_MS[attemptIndex];
       if (typeof retryDelayMs !== "number") {
         bridgeSendState.delete(key);
         bridgePendingSince.delete(key);
+        bridgeDebugLog("give-up", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex });
         return;
       }
 
+      bridgeDebugLog("retry-scheduled", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex: attemptIndex + 1, delayMs: retryDelayMs });
       setTimeout(() => {
-        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, attemptIndex + 1);
+        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, sourceTag, attemptIndex + 1);
       }, retryDelayMs);
     };
+
+    bridgeDebugLog("attempt-send", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, sentAtUtc: bridgeNowIso() });
 
     try {
       GM.xmlHttpRequest({
@@ -392,6 +404,9 @@
         headers: { "Content-Type": "application/json" },
         data: JSON.stringify({
           source: "RED Purchase Links first panel",
+          sendSource: sourceTag,
+          sentAtUtc: bridgeNowIso(),
+          attemptIndex,
           serviceLabel,
           url: normalizedUrl
         }),
@@ -401,34 +416,65 @@
           if (statusCode >= 200 && statusCode < 300) {
             bridgeSendState.set(key, "sent");
             bridgePendingSince.delete(key);
+            bridgeDebugLog("attempt-success", {
+              source: sourceTag,
+              label: serviceLabel,
+              url: normalizedUrl,
+              attemptIndex,
+              statusCode,
+              durationMs: Date.now() - startedAtMs,
+              responseText: String(response?.responseText || "")
+            });
             return;
           }
+          bridgeDebugLog("attempt-http-failure", {
+            source: sourceTag,
+            label: serviceLabel,
+            url: normalizedUrl,
+            attemptIndex,
+            statusCode,
+            durationMs: Date.now() - startedAtMs
+          });
           scheduleRetry();
         },
-        onerror: scheduleRetry,
-        ontimeout: scheduleRetry
+        onerror: () => {
+          bridgeDebugLog("attempt-network-error", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, durationMs: Date.now() - startedAtMs });
+          scheduleRetry();
+        },
+        ontimeout: () => {
+          bridgeDebugLog("attempt-timeout", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, durationMs: Date.now() - startedAtMs });
+          scheduleRetry();
+        }
       });
     } catch {
+      bridgeDebugLog("attempt-exception", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex });
       scheduleRetry();
     }
   };
 
-  const sendBridgeUrl = (serviceLabel, url) => {
+  const sendBridgeUrl = (serviceLabel, url, sourceTag = "unknown") => {
     const normalizedUrl = String(url || "").trim();
     if (!normalizedUrl) return;
 
     const key = bridgeSendKey(serviceLabel || "URL", normalizedUrl);
     const state = bridgeSendState.get(key);
-    if (state === "sent") return;
+    if (state === "sent") {
+      bridgeDebugLog("skip-already-sent", { source: sourceTag, label: serviceLabel, url: normalizedUrl });
+      return;
+    }
 
     if (state === "pending") {
       const pendingSince = Number(bridgePendingSince.get(key) || 0);
-      if (pendingSince > 0 && (Date.now() - pendingSince) < BRIDGE_PENDING_RETRY_GUARD_MS) return;
+      const pendingAgeMs = pendingSince > 0 ? (Date.now() - pendingSince) : 0;
+      if (pendingSince > 0 && pendingAgeMs < BRIDGE_PENDING_RETRY_GUARD_MS) {
+        bridgeDebugLog("skip-still-pending", { source: sourceTag, label: serviceLabel, url: normalizedUrl, pendingAgeMs });
+        return;
+      }
     }
 
     bridgeSendState.set(key, "pending");
     bridgePendingSince.set(key, Date.now());
-    sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, 0);
+    sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, sourceTag, 0);
   };
 
   const notifyCopied = (serviceLabel, url) => {
@@ -436,7 +482,7 @@
       `Copied ${esc(serviceLabel)} URL to clipboard<br><span style="font-size:14px;color:#ddd;font-weight:600;">${esc(url)}</span>`,
       "#7CFC90"
     );
-    sendBridgeUrl(serviceLabel, url);
+    sendBridgeUrl(serviceLabel, url, "copy-now");
   };
 
   const copyNow = (serviceLabel, url) => {
@@ -483,7 +529,7 @@
   let lastRenderState = { ...DEFAULT_RENDER_STATE };
   let onDemandLabelSearch = null;
 
-  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
+  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }, sourceTag = "panel-render") => {
     const candidates = [
       ["Qobuz", qobuz],
       ["Tidal", tidal],
@@ -494,7 +540,7 @@
     for (const [label, candidateUrl] of candidates) {
       const normalizedUrl = String(candidateUrl || "").trim();
       if (!normalizedUrl) continue;
-      sendBridgeUrl(label, normalizedUrl);
+      sendBridgeUrl(label, normalizedUrl, sourceTag);
     }
   };
 
@@ -507,7 +553,7 @@
         deezer: current.deezer || "",
         deezerLabel: current.deezerLabel || "Deezer",
         beatport: current.beatport || ""
-      });
+      }, "watchdog");
     }, BRIDGE_WATCHDOG_INTERVAL_MS);
   }
 
@@ -2217,7 +2263,7 @@
       const count = [q, t, d, b].filter(Boolean).length;
 
       // Push description-derived URLs to the bridge immediately, before slower lookup branches.
-      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
+      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b }, "description-extract");
 
       // Description Beatport links trump all other logic.
       // If the RED request description already contains a Beatport URL,
