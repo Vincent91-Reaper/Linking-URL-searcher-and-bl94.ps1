@@ -2097,7 +2097,7 @@
       const response = data.response || {};
 
       // Only run for RED requests with bounty of at least 200.00 MB.
-      // RED stores/display-bases bounty in binary MB:
+      // RED stores/displays bounty in binary MB:
       // 200 MB = 200 * 1024 * 1024 = 209715200 bytes.
       const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
       const totalBountyBytes = Number(response?.totalBounty || 0);
