@@ -365,7 +365,10 @@
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
 
   const BRIDGE_RETRY_DELAYS_MS = [0, 150, 500, 1200];
+  const BRIDGE_PENDING_RETRY_GUARD_MS = 2500;
+  const BRIDGE_WATCHDOG_INTERVAL_MS = 3000;
   const bridgeSendState = new Map();
+  const bridgePendingSince = new Map();
   const bridgeSendKey = (serviceLabel, url) => `${serviceLabel}\u0000${url}`;
 
   const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, attemptIndex) => {
@@ -373,6 +376,7 @@
       const nextAttemptIndex = attemptIndex + 1;
       if (nextAttemptIndex >= BRIDGE_RETRY_DELAYS_MS.length) {
         bridgeSendState.delete(key);
+        bridgePendingSince.delete(key);
         return;
       }
 
@@ -397,6 +401,7 @@
           const statusCode = Number(response?.status || 0);
           if (statusCode >= 200 && statusCode < 300) {
             bridgeSendState.set(key, "sent");
+            bridgePendingSince.delete(key);
             return;
           }
           scheduleRetry();
@@ -415,9 +420,15 @@
 
     const key = bridgeSendKey(serviceLabel || "URL", normalizedUrl);
     const state = bridgeSendState.get(key);
-    if (state === "pending" || state === "sent") return;
+    if (state === "sent") return;
+
+    if (state === "pending") {
+      const pendingSince = Number(bridgePendingSince.get(key) || 0);
+      if (pendingSince > 0 && (Date.now() - pendingSince) < BRIDGE_PENDING_RETRY_GUARD_MS) return;
+    }
 
     bridgeSendState.set(key, "pending");
+    bridgePendingSince.set(key, Date.now());
     sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, 0);
   };
 
@@ -487,6 +498,19 @@
       sendBridgeUrl(label, normalizedUrl);
     }
   };
+
+  if (IS_RED_REQUEST_PAGE) {
+    setInterval(() => {
+      const current = { ...(lastRenderState || DEFAULT_RENDER_STATE) };
+      sendFirstPanelUrlsToBridge({
+        qobuz: current.qobuz || "",
+        tidal: current.tidal || "",
+        deezer: current.deezer || "",
+        deezerLabel: current.deezerLabel || "Deezer",
+        beatport: current.beatport || ""
+      });
+    }, BRIDGE_WATCHDOG_INTERVAL_MS);
+  }
 
   const renderResults = ({ release = "", qobuz = "", tidal = "", tidalSearch = "", deezer = "", deezerLabel = "Deezer", beatport = "", beatportSearch = "", copied = "", serviceStatus = {} }) => {
     lastRenderState = {
