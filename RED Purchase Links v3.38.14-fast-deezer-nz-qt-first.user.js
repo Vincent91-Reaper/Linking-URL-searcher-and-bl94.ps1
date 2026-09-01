@@ -364,8 +364,8 @@
   const beatportSearchUrl = (artist, titleNoYearStr) =>
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
 
-  const BRIDGE_RETRY_DELAYS_MS = [0, 150, 500, 1200];
-  const BRIDGE_PENDING_RETRY_GUARD_MS = 2500;
+  const BRIDGE_RETRY_DELAYS_MS = [150, 500, 1200];
+  const BRIDGE_PENDING_RETRY_GUARD_MS = 7000;
   const BRIDGE_WATCHDOG_INTERVAL_MS = 3000;
   const bridgeSendState = new Map();
   const bridgePendingSince = new Map();
@@ -373,17 +373,16 @@
 
   const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, attemptIndex) => {
     const scheduleRetry = () => {
-      const nextAttemptIndex = attemptIndex + 1;
-      if (nextAttemptIndex >= BRIDGE_RETRY_DELAYS_MS.length) {
+      const retryDelayMs = BRIDGE_RETRY_DELAYS_MS[attemptIndex];
+      if (typeof retryDelayMs !== "number") {
         bridgeSendState.delete(key);
         bridgePendingSince.delete(key);
         return;
       }
 
-      const delayMs = BRIDGE_RETRY_DELAYS_MS[nextAttemptIndex];
       setTimeout(() => {
-        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, nextAttemptIndex);
-      }, delayMs);
+        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, attemptIndex + 1);
+      }, retryDelayMs);
     };
 
     try {
