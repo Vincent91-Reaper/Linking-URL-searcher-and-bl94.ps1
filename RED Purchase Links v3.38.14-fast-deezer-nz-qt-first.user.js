@@ -430,7 +430,9 @@
         body: payloadText,
         keepalive: true
       })
-        .then(() => {})
+        .then(() => {
+          gmFallbackDispatched = true;
+        })
         .catch(() => {
           dispatchGmFallback();
         });
