@@ -2495,6 +2495,34 @@
         return bLookupPromise;
       };
 
+      const warmMissingResultsInBackground = (state) => {
+        const snapshot = { ...(state || {}) };
+        if (!snapshot.qobuz) {
+          void getQobuzLookup().then((value) => {
+            if (!value) return;
+            updateRenderedState({ qobuz: value });
+          });
+        }
+        if (!snapshot.tidal) {
+          void getTidalLookup().then((res) => {
+            if (res?.exact) updateRenderedState({ tidal: res.exact, tidalSearch: "" });
+            else if (res?.search) updateRenderedState({ tidalSearch: res.search });
+          });
+        }
+        if (!snapshot.deezer) {
+          void getDeezerLookup().then((res) => {
+            if (!res?.url) return;
+            updateRenderedState({ deezer: res.url, deezerLabel: res.label || "Deezer" });
+          });
+        }
+        if (requestInfo.isBeatportRelevant && !snapshot.beatport) {
+          void getBeatportLookup().then((value) => {
+            if (!value) return;
+            updateRenderedState({ beatport: value, beatportSearch: "" });
+          });
+        }
+      };
+
       onDemandLabelSearch = async (service) => {
         if (!service || manualSearchInFlight.has(service)) return;
         manualSearchInFlight.add(service);
@@ -2567,7 +2595,7 @@
       // copy it immediately and display it without running any searches.
       if (b) {
         copyNow("Beatport", b);
-        renderResults({
+        const initialState = {
           copied: b,
           release,
           qobuz: q,
@@ -2575,20 +2603,26 @@
           deezer: d,
           deezerLabel,
           beatport: b
-        });
+        };
+        renderResults(initialState);
+        warmMissingResultsInBackground(initialState);
         return;
       }
 
       if (requestInfo.is24BitOnly) {
         if (q) {
           copyNow("Qobuz", q);
-          renderResults({ copied: q, release, qobuz: q, tidal: t, deezer: "", deezerLabel, beatport: "" });
+          const initialState = { copied: q, release, qobuz: q, tidal: t, deezer: "", deezerLabel, beatport: "" };
+          renderResults(initialState);
+          warmMissingResultsInBackground(initialState);
           return;
         }
 
         if (t) {
           copyNow("Tidal", t);
-          renderResults({ copied: t, release, qobuz: "", tidal: t, deezer: "", deezerLabel, beatport: "" });
+          const initialState = { copied: t, release, qobuz: "", tidal: t, deezer: "", deezerLabel, beatport: "" };
+          renderResults(initialState);
+          warmMissingResultsInBackground(initialState);
           return;
         }
 
@@ -2615,13 +2649,17 @@
 
       if (q) {
         copyNow("Qobuz", q);
-        renderResults({ copied: q, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
+        const initialState = { copied: q, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b };
+        renderResults(initialState);
+        warmMissingResultsInBackground(initialState);
         return;
       }
 
       if (t) {
         copyNow("Tidal", t);
-        renderResults({ copied: t, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
+        const initialState = { copied: t, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b };
+        renderResults(initialState);
+        warmMissingResultsInBackground(initialState);
         return;
       }
 
