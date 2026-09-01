@@ -131,6 +131,7 @@ function Get-BridgePayloadFromRequest {
         SendSource  = ''
         ServiceLabel = ''
         SentAtUtc   = $null
+        EnqueuedUtc = $null
         AttemptIndex = $null
         RawBodyLength = ($body | ForEach-Object { [string]$_ }).Length
     }
