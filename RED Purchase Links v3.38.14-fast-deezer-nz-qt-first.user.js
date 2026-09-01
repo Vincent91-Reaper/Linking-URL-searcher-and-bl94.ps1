@@ -436,6 +436,27 @@
 
   let lastRenderState = { ...DEFAULT_RENDER_STATE };
   let onDemandLabelSearch = null;
+  const bridgePanelSentUrls = new Set();
+
+  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
+    const candidates = [
+      ["Qobuz", qobuz],
+      ["Tidal", tidal],
+      [deezerLabel || "Deezer", deezer],
+      ["Beatport", beatport]
+    ];
+
+    for (const [label, candidateUrl] of candidates) {
+      const normalizedUrl = String(candidateUrl || "").trim();
+      if (!normalizedUrl) continue;
+
+      const dedupeKey = `${label}\u0000${normalizedUrl}`;
+      if (bridgePanelSentUrls.has(dedupeKey)) continue;
+
+      bridgePanelSentUrls.add(dedupeKey);
+      sendBridgeUrl(label, normalizedUrl);
+    }
+  };
 
   const renderResults = ({ release = "", qobuz = "", tidal = "", tidalSearch = "", deezer = "", deezerLabel = "Deezer", beatport = "", beatportSearch = "", copied = "", serviceStatus = {} }) => {
     lastRenderState = {
@@ -450,6 +471,8 @@
       copied,
       serviceStatus: { ...(serviceStatus || {}) }
     };
+
+    sendFirstPanelUrlsToBridge({ qobuz, tidal, deezer, deezerLabel, beatport });
 
     const row = (label, url, serviceKey = "", statusText = "") => {
       const style = brandStyleByLabel(label);
