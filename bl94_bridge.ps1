@@ -131,6 +131,7 @@ function Get-BridgePayloadFromRequest {
         SendSource  = ''
         ServiceLabel = ''
         SentAtUtc   = $null
+        FirstSeenAtUtc = $null
         EnqueuedUtc = $null
         AttemptIndex = $null
         RawBodyLength = ($body | ForEach-Object { [string]$_ }).Length
@@ -149,6 +150,7 @@ function Get-BridgePayloadFromRequest {
             $payload.SendSource = [string]$json.sendSource
             $payload.ServiceLabel = [string]$json.serviceLabel
             $payload.SentAtUtc = Parse-BridgeSentTimestamp ([string]$json.sentAtUtc)
+            $payload.FirstSeenAtUtc = Parse-BridgeSentTimestamp ([string]$json.firstSeenAtUtc)
             if ($null -ne $json.attemptIndex -and ([string]$json.attemptIndex -match '^\d+$')) {
                 $payload.AttemptIndex = [int]$json.attemptIndex
             }
@@ -280,12 +282,17 @@ try {
                         if ($bridgePayload.SentAtUtc) {
                             $receiveLagMs = [int][Math]::Round($receivedUtc.Subtract($bridgePayload.SentAtUtc).TotalMilliseconds)
                         }
+                        $discoveryLagMs = $null
+                        if ($bridgePayload.FirstSeenAtUtc) {
+                            $discoveryLagMs = [int][Math]::Round($receivedUtc.Subtract($bridgePayload.FirstSeenAtUtc).TotalMilliseconds)
+                        }
 
                         $attemptLabel = if ($null -ne $bridgePayload.AttemptIndex) { [string]$bridgePayload.AttemptIndex } else { '-' }
                         $lagLabel = if ($null -ne $receiveLagMs) { "$receiveLagMs ms" } else { 'n/a' }
+                        $discoveryLagLabel = if ($null -ne $discoveryLagMs) { "$discoveryLagMs ms" } else { 'n/a' }
                         $activeState = if ($activeBl94) { 'busy' } else { 'idle' }
 
-                        Write-Host ("[Bridge][recv {0}] status={1} active={2} queue={3} service={4} sendSource={5} attempt={6} lag={7} url={8}" -f $receivedUtc.ToString('HH:mm:ss.fff'), $queueStatus, $activeState, $queuedUrls.Count, $bridgePayload.ServiceLabel, $bridgePayload.SendSource, $attemptLabel, $lagLabel, $bridgePayload.Url) -ForegroundColor Cyan
+                        Write-Host ("[Bridge][recv {0}] status={1} active={2} queue={3} service={4} sendSource={5} attempt={6} sendLag={7} firstSeenLag={8} url={9}" -f $receivedUtc.ToString('HH:mm:ss.fff'), $queueStatus, $activeState, $queuedUrls.Count, $bridgePayload.ServiceLabel, $bridgePayload.SendSource, $attemptLabel, $lagLabel, $discoveryLagLabel, $bridgePayload.Url) -ForegroundColor Cyan
                     }
                 } while ($contextTask.AsyncWaitHandle.WaitOne(0))
             }
@@ -310,13 +317,18 @@ try {
                 if ($nextItem.SentAtUtc) {
                     $startLagMs = [int][Math]::Round(([DateTime]::UtcNow).Subtract($nextItem.SentAtUtc).TotalMilliseconds)
                 }
+                $firstSeenLagMs = $null
+                if ($nextItem.FirstSeenAtUtc) {
+                    $firstSeenLagMs = [int][Math]::Round(([DateTime]::UtcNow).Subtract($nextItem.FirstSeenAtUtc).TotalMilliseconds)
+                }
                 $queueWaitMs = $null
                 if ($nextItem.EnqueuedUtc) {
                     $queueWaitMs = [int][Math]::Round(([DateTime]::UtcNow).Subtract($nextItem.EnqueuedUtc).TotalMilliseconds)
                 }
                 $startLagLabel = if ($null -ne $startLagMs) { "$startLagMs ms" } else { 'n/a' }
+                $firstSeenLagLabel = if ($null -ne $firstSeenLagMs) { "$firstSeenLagMs ms" } else { 'n/a' }
                 $queueWaitLabel = if ($null -ne $queueWaitMs) { "$queueWaitMs ms" } else { 'n/a' }
-                Write-Host ("[Bridge][start {0}] queueWait={1} totalLag={2} url={3}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss.fff')), $queueWaitLabel, $startLagLabel, $nextUrl) -ForegroundColor Green
+                Write-Host ("[Bridge][start {0}] queueWait={1} sendLag={2} firstSeenLag={3} url={4}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss.fff')), $queueWaitLabel, $startLagLabel, $firstSeenLagLabel, $nextUrl) -ForegroundColor Green
 
                 $activeBl94 = Start-Bl94Process $nextUrl
             }

@@ -370,6 +370,7 @@
   const BRIDGE_DEBUG = true;
   const bridgeSendState = new Map();
   const bridgePendingSince = new Map();
+  const bridgeFirstSeenAt = new Map();
   const bridgeSendKey = (serviceLabel, url) => `${serviceLabel}\u0000${url}`;
   const bridgeNowIso = () => new Date().toISOString();
   const bridgeDebugLog = (...args) => {
@@ -377,7 +378,54 @@
     console.log("[RED Purchase Links][bridge-debug]", ...args);
   };
 
-  const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, sourceTag, attemptIndex) => {
+  const postBridgeViaFetch = async (payload, timeoutMs = 1000) => {
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const response = await fetch(BL94_BRIDGE_ENDPOINT, {
+        method: "POST",
+        mode: "cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller ? controller.signal : undefined,
+        keepalive: true
+      });
+      const text = await response.text().catch(() => "");
+      return { ok: response.ok, statusCode: Number(response.status || 0), responseText: text, transport: "fetch" };
+    } catch (error) {
+      return { ok: false, statusCode: 0, transport: "fetch", error: String(error || "fetch-error") };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  const postBridgeViaGm = (payload, timeoutMs = 1200) =>
+    new Promise((resolve) => {
+      try {
+        GM.xmlHttpRequest({
+          method: "POST",
+          url: BL94_BRIDGE_ENDPOINT,
+          headers: { "Content-Type": "application/json" },
+          data: JSON.stringify(payload),
+          timeout: timeoutMs,
+          onload: (response) => {
+            const statusCode = Number(response?.status || 0);
+            resolve({
+              ok: statusCode >= 200 && statusCode < 300,
+              statusCode,
+              responseText: String(response?.responseText || ""),
+              transport: "gm"
+            });
+          },
+          onerror: () => resolve({ ok: false, statusCode: 0, transport: "gm", error: "network-error" }),
+          ontimeout: () => resolve({ ok: false, statusCode: 0, transport: "gm", error: "timeout" })
+        });
+      } catch (error) {
+        resolve({ ok: false, statusCode: 0, transport: "gm", error: String(error || "gm-exception") });
+      }
+    });
+
+  const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, sourceTag, attemptIndex, firstSeenAtUtc) => {
     const startedAtMs = Date.now();
 
     const scheduleRetry = () => {
@@ -391,64 +439,77 @@
 
       bridgeDebugLog("retry-scheduled", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex: attemptIndex + 1, delayMs: retryDelayMs });
       setTimeout(() => {
-        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, sourceTag, attemptIndex + 1);
+        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, sourceTag, attemptIndex + 1, firstSeenAtUtc);
       }, retryDelayMs);
     };
 
-    bridgeDebugLog("attempt-send", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, sentAtUtc: bridgeNowIso() });
+    const sentAtUtc = bridgeNowIso();
+    bridgeDebugLog("attempt-send", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, sentAtUtc, firstSeenAtUtc });
 
-    try {
-      GM.xmlHttpRequest({
-        method: "POST",
-        url: BL94_BRIDGE_ENDPOINT,
-        headers: { "Content-Type": "application/json" },
-        data: JSON.stringify({
-          source: "RED Purchase Links first panel",
-          sendSource: sourceTag,
-          sentAtUtc: bridgeNowIso(),
-          attemptIndex,
-          serviceLabel,
-          url: normalizedUrl
-        }),
-        timeout: 1200,
-        onload: (response) => {
-          const statusCode = Number(response?.status || 0);
-          if (statusCode >= 200 && statusCode < 300) {
-            bridgeSendState.set(key, "sent");
-            bridgePendingSince.delete(key);
-            bridgeDebugLog("attempt-success", {
-              source: sourceTag,
-              label: serviceLabel,
-              url: normalizedUrl,
-              attemptIndex,
-              statusCode,
-              durationMs: Date.now() - startedAtMs,
-              responseText: String(response?.responseText || "")
-            });
-            return;
-          }
-          bridgeDebugLog("attempt-http-failure", {
-            source: sourceTag,
-            label: serviceLabel,
-            url: normalizedUrl,
-            attemptIndex,
-            statusCode,
-            durationMs: Date.now() - startedAtMs
-          });
-          scheduleRetry();
-        },
-        onerror: () => {
-          bridgeDebugLog("attempt-network-error", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, durationMs: Date.now() - startedAtMs });
-          scheduleRetry();
-        },
-        ontimeout: () => {
-          bridgeDebugLog("attempt-timeout", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, durationMs: Date.now() - startedAtMs });
-          scheduleRetry();
-        }
+    const payload = {
+      source: "RED Purchase Links first panel",
+      sendSource: sourceTag,
+      sentAtUtc,
+      firstSeenAtUtc: firstSeenAtUtc || sentAtUtc,
+      attemptIndex,
+      serviceLabel,
+      url: normalizedUrl
+    };
+
+    const transports = [
+      postBridgeViaFetch(payload),
+      postBridgeViaGm(payload)
+    ];
+
+    let finished = false;
+    let failureCount = 0;
+    const neededFailures = transports.length;
+
+    const onFailure = (result) => {
+      if (finished) return;
+      failureCount += 1;
+      bridgeDebugLog("attempt-failure", {
+        source: sourceTag,
+        label: serviceLabel,
+        url: normalizedUrl,
+        attemptIndex,
+        transport: result.transport || "unknown",
+        statusCode: Number(result.statusCode || 0),
+        error: result.error || "",
+        durationMs: Date.now() - startedAtMs
       });
-    } catch {
-      bridgeDebugLog("attempt-exception", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex });
-      scheduleRetry();
+      if (failureCount >= neededFailures) {
+        finished = true;
+        scheduleRetry();
+      }
+    };
+
+    const onSuccess = (result) => {
+      if (finished) return;
+      finished = true;
+      bridgeSendState.set(key, "sent");
+      bridgePendingSince.delete(key);
+      bridgeDebugLog("attempt-success", {
+        source: sourceTag,
+        label: serviceLabel,
+        url: normalizedUrl,
+        attemptIndex,
+        transport: result.transport || "unknown",
+        statusCode: Number(result.statusCode || 0),
+        durationMs: Date.now() - startedAtMs,
+        responseText: String(result.responseText || "")
+      });
+    };
+
+    for (const transportPromise of transports) {
+      transportPromise
+        .then((result) => {
+          if (result?.ok) onSuccess(result);
+          else onFailure(result || { transport: "unknown", error: "empty-result" });
+        })
+        .catch((error) => {
+          onFailure({ transport: "unknown", error: String(error || "transport-exception") });
+        });
     }
   };
 
@@ -457,6 +518,9 @@
     if (!normalizedUrl) return;
 
     const key = bridgeSendKey(serviceLabel || "URL", normalizedUrl);
+    if (!bridgeFirstSeenAt.has(key)) bridgeFirstSeenAt.set(key, bridgeNowIso());
+    const firstSeenAtUtc = bridgeFirstSeenAt.get(key) || bridgeNowIso();
+
     const state = bridgeSendState.get(key);
     if (state === "sent") {
       bridgeDebugLog("skip-already-sent", { source: sourceTag, label: serviceLabel, url: normalizedUrl });
@@ -474,7 +538,7 @@
 
     bridgeSendState.set(key, "pending");
     bridgePendingSince.set(key, Date.now());
-    sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, sourceTag, 0);
+    sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, sourceTag, 0, firstSeenAtUtc);
   };
 
   const notifyCopied = (serviceLabel, url) => {
