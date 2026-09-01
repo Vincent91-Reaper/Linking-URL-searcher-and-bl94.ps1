@@ -61,6 +61,7 @@
   const BL94_BRIDGE_ENDPOINT = "http://127.0.0.1:17894/bridge-url";
   const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
   const bridgeFirstSeenAtByKey = new Map();
+  const pendingBridgeBeacons = new Set();
 
   const PANEL_LEFT = "200px";
   const PANEL_TOP = "350px";
@@ -548,6 +549,12 @@
       const img = new Image();
       img.decoding = "async";
       img.referrerPolicy = "no-referrer";
+      pendingBridgeBeacons.add(img);
+      const cleanupBeacon = () => {
+        pendingBridgeBeacons.delete(img);
+      };
+      img.onload = cleanupBeacon;
+      img.onerror = cleanupBeacon;
       img.src = beaconUrl;
     } catch {}
 
@@ -2420,6 +2427,32 @@
     perfLog("summary", { durationMs: nowMs() - perfRunStartMs, services: summary });
   };
 
+  const extractTotalBountyBytes = (response) => {
+    const directCandidates = [
+      response?.totalBounty,
+      response?.total_bounty,
+      response?.bounty,
+      response?.bountyTotal
+    ];
+
+    for (const candidate of directCandidates) {
+      const n = Number(candidate);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+
+    const bountyRows = Array.isArray(response?.bounties) ? response.bounties : [];
+    if (bountyRows.length > 0) {
+      let sum = 0;
+      for (const row of bountyRows) {
+        const n = Number(row?.amount || row?.value || row?.bounty || 0);
+        if (Number.isFinite(n) && n > 0) sum += n;
+      }
+      if (sum > 0) return sum;
+    }
+
+    return 0;
+  };
+
   const buildNoMatchMessage = () => "No match at all";
 
   (async () => {
@@ -2435,7 +2468,7 @@
       // Only run for RED requests with bounty of at least 200.00 MB.
       // RED stores/displays bounty in binary MB:
       // 200 MB = 200 * 1024 * 1024 = 209715200 bytes.
-      const totalBountyBytes = Number(response?.totalBounty || 0);
+      const totalBountyBytes = extractTotalBountyBytes(response);
 
       if (totalBountyBytes < MIN_BOUNTY_BYTES) {
         perfLog("skipped: bounty below threshold", { totalBountyBytes, minBountyBytes: MIN_BOUNTY_BYTES });
