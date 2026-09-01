@@ -83,7 +83,7 @@ function Write-BridgeResponse {
     $response.StatusCode = $StatusCode
     $response.ContentType = 'application/json; charset=utf-8'
     $response.Headers['Access-Control-Allow-Origin'] = '*'
-    $response.Headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    $response.Headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     $response.Headers['Access-Control-Allow-Headers'] = 'Content-Type'
 
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
@@ -121,6 +121,49 @@ function ConvertFrom-BridgeTimestamp {
     return $null
 }
 
+function Get-BridgePayloadFromQuery {
+    param([System.Net.HttpListenerRequest]$Request)
+
+    $query = $Request.Url.Query
+    $payload = [ordered]@{
+        Url            = $null
+        Source         = 'RED Purchase Links first panel'
+        SendSource     = ''
+        ServiceLabel   = ''
+        SentAtUtc      = $null
+        FirstSeenAtUtc = $null
+        EnqueuedUtc    = $null
+        AttemptIndex   = $null
+        RawBodyLength  = 0
+    }
+
+    if (-not $query) { return [pscustomobject]$payload }
+
+    try {
+        $raw = $query.TrimStart('?')
+        $pairs = $raw -split '&'
+        $queryMap = @{}
+        foreach ($pair in $pairs) {
+            if (-not $pair) { continue }
+            $kv = $pair -split '=', 2
+            $k = [System.Uri]::UnescapeDataString(([string]$kv[0]).Replace('+', ' '))
+            $v = if ($kv.Count -gt 1) { [System.Uri]::UnescapeDataString(([string]$kv[1]).Replace('+', ' ')) } else { '' }
+            if ($k) { $queryMap[$k] = $v }
+        }
+
+        $payload.Url = Get-MusicServiceUrlFromText ([string]$queryMap['url'])
+        $payload.ServiceLabel = [string]$queryMap['serviceLabel']
+        $payload.SendSource = [string]$queryMap['sendSource']
+        $payload.SentAtUtc = ConvertFrom-BridgeTimestamp ([string]$queryMap['sentAtUtc'])
+        $payload.FirstSeenAtUtc = ConvertFrom-BridgeTimestamp ([string]$queryMap['firstSeenAtUtc'])
+        if ([string]$queryMap['attemptIndex'] -match '^\d+$') {
+            $payload.AttemptIndex = [int]$queryMap['attemptIndex']
+        }
+    } catch {}
+
+    return [pscustomobject]$payload
+}
+
 function Get-BridgePayloadFromRequest {
     param([System.Net.HttpListenerRequest]$Request)
 
@@ -135,49 +178,6 @@ function Get-BridgePayloadFromRequest {
         EnqueuedUtc = $null
         AttemptIndex = $null
         RawBodyLength = ($body | ForEach-Object { [string]$_ }).Length
-    }
-
-    function Get-BridgePayloadFromQuery {
-        param([System.Net.HttpListenerRequest]$Request)
-
-        $query = $Request.Url.Query
-        $payload = [ordered]@{
-            Url          = $null
-            Source       = 'RED Purchase Links first panel'
-            SendSource   = ''
-            ServiceLabel = ''
-            SentAtUtc    = $null
-            FirstSeenAtUtc = $null
-            EnqueuedUtc  = $null
-            AttemptIndex = $null
-            RawBodyLength = 0
-        }
-
-        if (-not $query) { return [pscustomobject]$payload }
-
-        try {
-            $raw = $query.TrimStart('?')
-            $pairs = $raw -split '&'
-            $queryMap = @{}
-            foreach ($pair in $pairs) {
-                if (-not $pair) { continue }
-                $kv = $pair -split '=', 2
-                $k = [System.Uri]::UnescapeDataString(([string]$kv[0]).Replace('+', ' '))
-                $v = if ($kv.Count -gt 1) { [System.Uri]::UnescapeDataString(([string]$kv[1]).Replace('+', ' ')) } else { '' }
-                if ($k) { $queryMap[$k] = $v }
-            }
-
-            $payload.Url = Get-MusicServiceUrlFromText ([string]$queryMap['url'])
-            $payload.ServiceLabel = [string]$queryMap['serviceLabel']
-            $payload.SendSource = [string]$queryMap['sendSource']
-            $payload.SentAtUtc = ConvertFrom-BridgeTimestamp ([string]$queryMap['sentAtUtc'])
-            $payload.FirstSeenAtUtc = ConvertFrom-BridgeTimestamp ([string]$queryMap['firstSeenAtUtc'])
-            if ([string]$queryMap['attemptIndex'] -match '^\d+$') {
-                $payload.AttemptIndex = [int]$queryMap['attemptIndex']
-            }
-        } catch {}
-
-        return [pscustomobject]$payload
     }
 
     if (-not $body) {
