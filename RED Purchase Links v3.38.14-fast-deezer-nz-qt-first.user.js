@@ -398,16 +398,6 @@
     };
 
     try {
-      fetch(BL94_BRIDGE_ENDPOINT, {
-        method: "POST",
-        mode: "cors",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        keepalive: true
-      }).catch(() => {});
-    } catch {}
-
-    try {
       GM.xmlHttpRequest({
         method: "POST",
         url: BL94_BRIDGE_ENDPOINT,
