@@ -365,7 +365,7 @@
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
 
   const BRIDGE_RETRY_DELAYS_MS = [150, 500, 1200];
-  const BRIDGE_PENDING_RETRY_GUARD_MS = 7000;
+  const BRIDGE_PENDING_RETRY_GUARD_MS = 10000;
   const BRIDGE_WATCHDOG_INTERVAL_MS = 3000;
   const bridgeSendState = new Map();
   const bridgePendingSince = new Map();
