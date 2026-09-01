@@ -136,11 +136,6 @@
   const makeSearchCacheKey = (service, contextKey) => `${service}::${contextKey}`;
   const makePersistentCacheKey = (service, contextKey) => `${SEARCH_PERSIST_PREFIX}${service}::${contextKey}`;
 
-  const normalizeCacheResult = (value) => {
-    if (value == null) return null;
-    return value;
-  };
-
   const getCachedServiceResult = async (service, contextKey) => {
     const cacheKey = makeSearchCacheKey(service, contextKey);
     const now = nowMs();
@@ -149,7 +144,7 @@
     const mem = searchMemoryCache.get(cacheKey);
     if (mem && Number(mem.expiresAt || 0) > now) {
       stats.cacheHitMemory += 1;
-      return normalizeCacheResult(mem.value);
+      return mem.value;
     }
 
     const persistentKey = makePersistentCacheKey(service, contextKey);
@@ -158,7 +153,7 @@
       if (persisted && Number(persisted.expiresAt || 0) > now) {
         stats.cacheHitPersistent += 1;
         searchMemoryCache.set(cacheKey, { value: persisted.value, expiresAt: persisted.expiresAt });
-        return normalizeCacheResult(persisted.value);
+        return persisted.value;
       }
     } catch {}
 
@@ -1633,6 +1628,7 @@
   const tidalReleaseSearch = async (artistInput, titleWithMaybeYear, auth, requestInfo) => {
     const stats = getOrCreatePerfStats("tidal-release");
     let scoringMs = 0;
+    const refreshedAuthCandidates = [];
     const reqYear = parseYearFromTitle(titleWithMaybeYear);
     const cleanTitle = stripYearSuffix(titleWithMaybeYear);
     const queryVariants = buildQueryVariants(artistInput, cleanTitle);
@@ -1654,7 +1650,7 @@
       const tidalRes = await tidalGetWithRetry(api, auth);
       stats.requests += 1;
       perfLog("tidal-release: variant request", { query, durationMs: nowMs() - reqStartedAt, status: Number(tidalRes?.response?.status || 0) });
-      auth = tidalRes.auth;
+      if (tidalRes?.auth) refreshedAuthCandidates.push(tidalRes.auth);
 
       let j = {};
       try {
@@ -1687,6 +1683,10 @@
     }, {
       shouldStop: () => Boolean(earlyExact)
     });
+
+    if (refreshedAuthCandidates.length > 0) {
+      auth = refreshedAuthCandidates[refreshedAuthCandidates.length - 1] || auth;
+    }
 
     if (earlyExact) return { exact: earlyExact, close: "", auth };
 
@@ -1740,6 +1740,7 @@
   const tidalTrackSearch = async (artistInput, titleWithMaybeYear, auth, requestInfo) => {
     const stats = getOrCreatePerfStats("tidal-track");
     let scoringMs = 0;
+    const refreshedAuthCandidates = [];
     const cleanTitle = stripYearSuffix(titleWithMaybeYear);
     const queryVariants = buildQueryVariants(artistInput, cleanTitle);
 
@@ -1761,7 +1762,7 @@
       const tidalRes = await tidalGetWithRetry(api, auth);
       stats.requests += 1;
       perfLog("tidal-track: variant request", { query, durationMs: nowMs() - reqStartedAt, status: Number(tidalRes?.response?.status || 0) });
-      auth = tidalRes.auth;
+      if (tidalRes?.auth) refreshedAuthCandidates.push(tidalRes.auth);
 
       let j = {};
       try {
@@ -1803,6 +1804,10 @@
     }, {
       shouldStop: () => Boolean(exactResult)
     });
+
+    if (refreshedAuthCandidates.length > 0) {
+      auth = refreshedAuthCandidates[refreshedAuthCandidates.length - 1] || auth;
+    }
 
     if (exactResult) return { exact: exactResult, auth };
     perfLog("tidal-track: no exact", { scoringMs, seenTracks: seenTrackIds.size });
@@ -2432,7 +2437,10 @@
       // 200 MB = 200 * 1024 * 1024 = 209715200 bytes.
       const totalBountyBytes = Number(response?.totalBounty || 0);
 
-      if (totalBountyBytes < MIN_BOUNTY_BYTES) return;
+      if (totalBountyBytes < MIN_BOUNTY_BYTES) {
+        perfLog("skipped: bounty below threshold", { totalBountyBytes, minBountyBytes: MIN_BOUNTY_BYTES });
+        return;
+      }
 
       const requestInfo = buildRequestInfo(response);
 
