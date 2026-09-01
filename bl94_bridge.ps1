@@ -156,12 +156,32 @@ function Get-BridgePayloadFromRequest {
             }
             return [pscustomobject]$payload
         } catch {
-            $payload.Url = $null
-            return [pscustomobject]$payload
+            # fall through to raw-body extraction for backward compatibility
         }
     }
 
     $payload.Url = Get-MusicServiceUrlFromText $body
+    if (-not $payload.Url) {
+        $urlDecodedBody = $null
+        try {
+            $urlDecodedBody = [System.Uri]::UnescapeDataString([string]$body)
+        } catch {}
+        if ($urlDecodedBody) {
+            $payload.Url = Get-MusicServiceUrlFromText $urlDecodedBody
+        }
+    }
+    if (-not $payload.Url -and $body -match '(?i)"url"\s*:\s*"([^"]+)"') {
+        $jsonEscapedUrl = $matches[1] -replace '\\/', '/'
+        $payload.Url = Get-MusicServiceUrlFromText $jsonEscapedUrl
+    }
+
+    if (-not $payload.ServiceLabel -and $body -match '(?i)"serviceLabel"\s*:\s*"([^"]*)"') {
+        $payload.ServiceLabel = [string]$matches[1]
+    }
+    if (-not $payload.SendSource -and $body -match '(?i)"sendSource"\s*:\s*"([^"]*)"') {
+        $payload.SendSource = [string]$matches[1]
+    }
+
     return [pscustomobject]$payload
 }
 

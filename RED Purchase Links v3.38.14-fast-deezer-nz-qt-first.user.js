@@ -55,6 +55,7 @@
   const DEBUG_RED_PURCHASE_LINKS = false;
   const DEBUG_TOP_CANDIDATES = 8;
   const BL94_BRIDGE_ENDPOINT = "http://127.0.0.1:17894/bridge-url";
+  const bridgeFirstSeenAtByKey = new Map();
 
   const PANEL_LEFT = "200px";
   const PANEL_TOP = "350px";
@@ -364,206 +365,14 @@
   const beatportSearchUrl = (artist, titleNoYearStr) =>
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
 
-  const BRIDGE_RETRY_DELAYS_MS = [150, 500, 1200];
-  const BRIDGE_PENDING_RETRY_GUARD_MS = 10000;
-  const BRIDGE_WATCHDOG_INTERVAL_MS = 3000;
-  const BRIDGE_GM_FALLBACK_DELAY_MS = 250;
-  const BRIDGE_DEBUG = true;
-  const bridgeSendState = new Map();
-  const bridgePendingSince = new Map();
-  const bridgeFirstSeenAt = new Map();
-  const bridgeSendKey = (serviceLabel, url) => `${serviceLabel}\u0000${url}`;
-  const bridgeNowIso = () => new Date().toISOString();
-  const bridgeDebugLog = (...args) => {
-    if (!BRIDGE_DEBUG) return;
-    console.log("[RED Purchase Links][bridge-debug]", ...args);
-  };
-
-  const postBridgeViaFetch = async (payload, timeoutMs = 1000) => {
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
-    try {
-      const response = await fetch(BL94_BRIDGE_ENDPOINT, {
-        method: "POST",
-        mode: "cors",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: controller ? controller.signal : undefined,
-        keepalive: true
-      });
-      const text = await response.text().catch(() => "");
-      return { ok: response.ok, statusCode: Number(response.status || 0), responseText: text, transport: "fetch" };
-    } catch (error) {
-      return { ok: false, statusCode: 0, transport: "fetch", error: String(error || "fetch-error") };
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  };
-
-  const postBridgeViaGm = (payload, timeoutMs = 1200) =>
-    new Promise((resolve) => {
-      try {
-        GM.xmlHttpRequest({
-          method: "POST",
-          url: BL94_BRIDGE_ENDPOINT,
-          headers: { "Content-Type": "application/json" },
-          data: JSON.stringify(payload),
-          timeout: timeoutMs,
-          onload: (response) => {
-            const statusCode = Number(response?.status || 0);
-            resolve({
-              ok: statusCode >= 200 && statusCode < 300,
-              statusCode,
-              responseText: String(response?.responseText || ""),
-              transport: "gm"
-            });
-          },
-          onerror: () => resolve({ ok: false, statusCode: 0, transport: "gm", error: "network-error" }),
-          ontimeout: () => resolve({ ok: false, statusCode: 0, transport: "gm", error: "timeout" })
-        });
-      } catch (error) {
-        resolve({ ok: false, statusCode: 0, transport: "gm", error: String(error || "gm-exception") });
-      }
-    });
-
-  const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, sourceTag, attemptIndex, firstSeenAtUtc) => {
-    const startedAtMs = Date.now();
-
-    const scheduleRetry = () => {
-      const retryDelayMs = BRIDGE_RETRY_DELAYS_MS[attemptIndex];
-      if (typeof retryDelayMs !== "number") {
-        bridgeSendState.delete(key);
-        bridgePendingSince.delete(key);
-        bridgeDebugLog("give-up", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex });
-        return;
-      }
-
-      bridgeDebugLog("retry-scheduled", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex: attemptIndex + 1, delayMs: retryDelayMs });
-      setTimeout(() => {
-        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, sourceTag, attemptIndex + 1, firstSeenAtUtc);
-      }, retryDelayMs);
-    };
-
-    const sentAtUtc = bridgeNowIso();
-    bridgeDebugLog("attempt-send", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex, sentAtUtc, firstSeenAtUtc });
-
-    const payload = {
-      source: "RED Purchase Links first panel",
-      sendSource: sourceTag,
-      sentAtUtc,
-      firstSeenAtUtc: firstSeenAtUtc || sentAtUtc,
-      attemptIndex,
-      serviceLabel,
-      url: normalizedUrl
-    };
-
-    let finished = false;
-    let fetchSettled = false;
-    let gmSettled = false;
-    let gmStarted = false;
-
-    const maybeScheduleRetry = () => {
-      if (finished) return;
-      if (!fetchSettled) return;
-      if (gmStarted && !gmSettled) return;
-      finished = true;
-      scheduleRetry();
-    };
-
-    const onFailure = (result, transportName) => {
-      if (finished) return;
-      bridgeDebugLog("attempt-failure", {
-        source: sourceTag,
-        label: serviceLabel,
-        url: normalizedUrl,
-        attemptIndex,
-        transport: transportName || result.transport || "unknown",
-        statusCode: Number(result.statusCode || 0),
-        error: result.error || "",
-        durationMs: Date.now() - startedAtMs
-      });
-      if (transportName === "fetch") fetchSettled = true;
-      if (transportName === "gm") gmSettled = true;
-      maybeScheduleRetry();
-    };
-
-    const onSuccess = (result) => {
-      if (finished) return;
-      finished = true;
-      bridgeSendState.set(key, "sent");
-      bridgePendingSince.delete(key);
-      bridgeDebugLog("attempt-success", {
-        source: sourceTag,
-        label: serviceLabel,
-        url: normalizedUrl,
-        attemptIndex,
-        transport: result.transport || "unknown",
-        statusCode: Number(result.statusCode || 0),
-        durationMs: Date.now() - startedAtMs,
-        responseText: String(result.responseText || "")
-      });
-    };
-
-    const startGmFallback = () => {
-      if (finished || gmStarted) return;
-      gmStarted = true;
-      postBridgeViaGm(payload)
-        .then((result) => {
-          if (result?.ok) onSuccess(result);
-          else onFailure(result || { transport: "gm", error: "empty-result" }, "gm");
-        })
-        .catch((error) => {
-          onFailure({ transport: "gm", error: String(error || "transport-exception") }, "gm");
-        });
-    };
-
-    setTimeout(() => {
-      if (finished || fetchSettled) return;
-      bridgeDebugLog("starting-gm-fallback", { source: sourceTag, label: serviceLabel, url: normalizedUrl, attemptIndex });
-      startGmFallback();
-    }, BRIDGE_GM_FALLBACK_DELAY_MS);
-
-    postBridgeViaFetch(payload)
-      .then((result) => {
-        if (result?.ok) {
-          onSuccess(result);
-          return;
-        }
-        onFailure(result || { transport: "fetch", error: "empty-result" }, "fetch");
-        startGmFallback();
-      })
-      .catch((error) => {
-        onFailure({ transport: "fetch", error: String(error || "transport-exception") }, "fetch");
-        startGmFallback();
-      });
-  };
-
-  const sendBridgeUrl = (serviceLabel, url, sourceTag = "unknown") => {
+  const getBridgeFirstSeenAtUtc = (serviceLabel, url) => {
+    const label = String(serviceLabel || "URL");
     const normalizedUrl = String(url || "").trim();
-    if (!normalizedUrl) return;
-
-    const key = bridgeSendKey(serviceLabel || "URL", normalizedUrl);
-    if (!bridgeFirstSeenAt.has(key)) bridgeFirstSeenAt.set(key, bridgeNowIso());
-    const firstSeenAtUtc = bridgeFirstSeenAt.get(key) || bridgeNowIso();
-
-    const state = bridgeSendState.get(key);
-    if (state === "sent") {
-      bridgeDebugLog("skip-already-sent", { source: sourceTag, label: serviceLabel, url: normalizedUrl });
-      return;
+    const key = `${label}\u0000${normalizedUrl}`;
+    if (!bridgeFirstSeenAtByKey.has(key)) {
+      bridgeFirstSeenAtByKey.set(key, new Date().toISOString());
     }
-
-    if (state === "pending") {
-      const pendingSince = Number(bridgePendingSince.get(key) || 0);
-      const pendingAgeMs = pendingSince > 0 ? (Date.now() - pendingSince) : 0;
-      if (pendingSince > 0 && pendingAgeMs < BRIDGE_PENDING_RETRY_GUARD_MS) {
-        bridgeDebugLog("skip-still-pending", { source: sourceTag, label: serviceLabel, url: normalizedUrl, pendingAgeMs });
-        return;
-      }
-    }
-
-    bridgeSendState.set(key, "pending");
-    bridgePendingSince.set(key, Date.now());
-    sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, sourceTag, 0, firstSeenAtUtc);
+    return bridgeFirstSeenAtByKey.get(key) || new Date().toISOString();
   };
 
   const notifyCopied = (serviceLabel, url) => {
@@ -572,6 +381,44 @@
       "#7CFC90"
     );
     sendBridgeUrl(serviceLabel, url, "copy-now");
+  };
+
+  const sendBridgeUrl = (serviceLabel, url, sendSource = "panel-render") => {
+    const normalizedUrl = String(url || "").trim();
+    if (!normalizedUrl) return;
+
+    const payload = {
+      source: "RED Purchase Links first panel",
+      sendSource,
+      sentAtUtc: new Date().toISOString(),
+      firstSeenAtUtc: getBridgeFirstSeenAtUtc(serviceLabel, normalizedUrl),
+      attemptIndex: 0,
+      serviceLabel: String(serviceLabel || "URL"),
+      url: normalizedUrl
+    };
+
+    try {
+      fetch(BL94_BRIDGE_ENDPOINT, {
+        method: "POST",
+        mode: "cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true
+      }).catch(() => {});
+    } catch {}
+
+    try {
+      GM.xmlHttpRequest({
+        method: "POST",
+        url: BL94_BRIDGE_ENDPOINT,
+        headers: { "Content-Type": "application/json" },
+        data: JSON.stringify(payload),
+        timeout: 1500,
+        onload: () => {},
+        onerror: () => {},
+        ontimeout: () => {}
+      });
+    } catch {}
   };
 
   const copyNow = (serviceLabel, url) => {
@@ -617,8 +464,9 @@
 
   let lastRenderState = { ...DEFAULT_RENDER_STATE };
   let onDemandLabelSearch = null;
+  const bridgePanelSentKeys = new Set();
 
-  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }, sourceTag = "panel-render") => {
+  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
     const candidates = [
       ["Qobuz", qobuz],
       ["Tidal", tidal],
@@ -629,29 +477,12 @@
     for (const [label, candidateUrl] of candidates) {
       const normalizedUrl = String(candidateUrl || "").trim();
       if (!normalizedUrl) continue;
-      sendBridgeUrl(label, normalizedUrl, sourceTag);
+      const key = `${label}\u0000${normalizedUrl}`;
+      if (bridgePanelSentKeys.has(key)) continue;
+      bridgePanelSentKeys.add(key);
+      sendBridgeUrl(label, normalizedUrl, "panel-render");
     }
   };
-
-  if (IS_RED_REQUEST_PAGE) {
-    setInterval(() => {
-      const current = { ...(lastRenderState || DEFAULT_RENDER_STATE) };
-      const hasAnyUrl =
-        String(current.qobuz || "").trim() ||
-        String(current.tidal || "").trim() ||
-        String(current.deezer || "").trim() ||
-        String(current.beatport || "").trim();
-      if (!hasAnyUrl) return;
-
-      sendFirstPanelUrlsToBridge({
-        qobuz: current.qobuz || "",
-        tidal: current.tidal || "",
-        deezer: current.deezer || "",
-        deezerLabel: current.deezerLabel || "Deezer",
-        beatport: current.beatport || ""
-      }, "watchdog");
-    }, BRIDGE_WATCHDOG_INTERVAL_MS);
-  }
 
   const renderResults = ({ release = "", qobuz = "", tidal = "", tidalSearch = "", deezer = "", deezerLabel = "Deezer", beatport = "", beatportSearch = "", copied = "", serviceStatus = {} }) => {
     lastRenderState = {
@@ -2274,6 +2105,15 @@
       if (data?.status !== "success") return;
 
       const response = data.response || {};
+
+      // Only run for RED requests with bounty of at least 200.00 MB.
+      // RED stores/display-bases bounty in binary MB:
+      // 200 MB = 200 * 1024 * 1024 = 209715200 bytes.
+      const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
+      const totalBountyBytes = Number(response?.totalBounty || 0);
+
+      if (totalBountyBytes < MIN_BOUNTY_BYTES) return;
+
       const requestInfo = buildRequestInfo(response);
 
       const mediaList = requestInfo.mediaList;
@@ -2357,9 +2197,6 @@
       let q = desc.qobuz, t = desc.tidal, d = desc.deezer, b = desc.beatport;
       let deezerLabel = "Deezer";
       const count = [q, t, d, b].filter(Boolean).length;
-
-      // Push description-derived URLs to the bridge immediately, before slower lookup branches.
-      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b }, "description-extract");
 
       // Description Beatport links trump all other logic.
       // If the RED request description already contains a Beatport URL,
