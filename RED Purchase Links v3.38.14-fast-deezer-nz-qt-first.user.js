@@ -364,16 +364,23 @@
   const beatportSearchUrl = (artist, titleNoYearStr) =>
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
 
-  const notifyCopied = (serviceLabel, url) => {
-    showNotice(
-      `Copied ${esc(serviceLabel)} URL to clipboard<br><span style="font-size:14px;color:#ddd;font-weight:600;">${esc(url)}</span>`,
-      "#7CFC90"
-    );
-    sendBridgeUrl(serviceLabel, url);
-  };
+  const BRIDGE_RETRY_DELAYS_MS = [0, 150, 500, 1200];
+  const bridgeSendState = new Map();
+  const bridgeSendKey = (serviceLabel, url) => `${serviceLabel}\u0000${url}`;
 
-  const sendBridgeUrl = (serviceLabel, url) => {
-    if (!url) return;
+  const sendBridgeUrlAttempt = (serviceLabel, normalizedUrl, key, attemptIndex) => {
+    const scheduleRetry = () => {
+      const nextAttemptIndex = attemptIndex + 1;
+      if (nextAttemptIndex >= BRIDGE_RETRY_DELAYS_MS.length) {
+        bridgeSendState.delete(key);
+        return;
+      }
+
+      const delayMs = BRIDGE_RETRY_DELAYS_MS[nextAttemptIndex];
+      setTimeout(() => {
+        sendBridgeUrlAttempt(serviceLabel, normalizedUrl, key, nextAttemptIndex);
+      }, delayMs);
+    };
 
     try {
       GM.xmlHttpRequest({
@@ -383,14 +390,43 @@
         data: JSON.stringify({
           source: "RED Purchase Links first panel",
           serviceLabel,
-          url
+          url: normalizedUrl
         }),
-        timeout: 1500,
-        onload: () => {},
-        onerror: () => {},
-        ontimeout: () => {}
+        timeout: 1200,
+        onload: (response) => {
+          const statusCode = Number(response?.status || 0);
+          if (statusCode >= 200 && statusCode < 300) {
+            bridgeSendState.set(key, "sent");
+            return;
+          }
+          scheduleRetry();
+        },
+        onerror: scheduleRetry,
+        ontimeout: scheduleRetry
       });
-    } catch {}
+    } catch {
+      scheduleRetry();
+    }
+  };
+
+  const sendBridgeUrl = (serviceLabel, url) => {
+    const normalizedUrl = String(url || "").trim();
+    if (!normalizedUrl) return;
+
+    const key = bridgeSendKey(serviceLabel || "URL", normalizedUrl);
+    const state = bridgeSendState.get(key);
+    if (state === "pending" || state === "sent") return;
+
+    bridgeSendState.set(key, "pending");
+    sendBridgeUrlAttempt(serviceLabel || "URL", normalizedUrl, key, 0);
+  };
+
+  const notifyCopied = (serviceLabel, url) => {
+    showNotice(
+      `Copied ${esc(serviceLabel)} URL to clipboard<br><span style="font-size:14px;color:#ddd;font-weight:600;">${esc(url)}</span>`,
+      "#7CFC90"
+    );
+    sendBridgeUrl(serviceLabel, url);
   };
 
   const copyNow = (serviceLabel, url) => {
@@ -436,7 +472,6 @@
 
   let lastRenderState = { ...DEFAULT_RENDER_STATE };
   let onDemandLabelSearch = null;
-  const bridgePanelSentUrls = new Set();
 
   const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
     const candidates = [
@@ -449,11 +484,6 @@
     for (const [label, candidateUrl] of candidates) {
       const normalizedUrl = String(candidateUrl || "").trim();
       if (!normalizedUrl) continue;
-
-      const dedupeKey = `${label}\u0000${normalizedUrl}`;
-      if (bridgePanelSentUrls.has(dedupeKey)) continue;
-
-      bridgePanelSentUrls.add(dedupeKey);
       sendBridgeUrl(label, normalizedUrl);
     }
   };
@@ -2162,6 +2192,9 @@
       let q = desc.qobuz, t = desc.tidal, d = desc.deezer, b = desc.beatport;
       let deezerLabel = "Deezer";
       const count = [q, t, d, b].filter(Boolean).length;
+
+      // Push description-derived URLs to the bridge immediately, before slower lookup branches.
+      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
 
       // Description Beatport links trump all other logic.
       // If the RED request description already contains a Beatport URL,

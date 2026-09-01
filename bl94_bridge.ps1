@@ -1,6 +1,6 @@
 param(
     [string]$Bl94Path = (Join-Path $PSScriptRoot 'bl94.ps1'),
-    [int]$PollIntervalMs = 500,
+    [int]$PollIntervalMs = 50,
     [string]$ListenPrefix = 'http://127.0.0.1:17894/'
 )
 
@@ -133,6 +133,15 @@ function Add-BridgeUrl {
     if ($seenUrls.ContainsKey($Url)) { return 'duplicate' }
 
     $seenUrls[$Url] = [DateTime]::UtcNow
+
+    # Keep only the newest pending URL while bl94 is busy.
+    # This avoids long delays caused by stale queued URLs.
+    if ($activeBl94 -and $queuedUrls.Count -gt 0) {
+        while ($queuedUrls.Count -gt 0) {
+            [void]$queuedUrls.Dequeue()
+        }
+    }
+
     $queuedUrls.Enqueue($Url)
     return 'queued'
 }
@@ -213,22 +222,24 @@ try {
     while ($true) {
         try {
             if ($contextTask.AsyncWaitHandle.WaitOne($PollIntervalMs)) {
-                $context = $contextTask.GetAwaiter().GetResult()
-                $contextTask = $listener.GetContextAsync()
+                do {
+                    $context = $contextTask.GetAwaiter().GetResult()
+                    $contextTask = $listener.GetContextAsync()
 
-                if ($context.Request.HttpMethod -eq 'OPTIONS') {
-                    Write-BridgeResponse $context 204 ''
-                } elseif ($context.Request.HttpMethod -ne 'POST' -or $context.Request.Url.AbsolutePath -ne '/bridge-url') {
-                    Write-BridgeResponse $context 404 (ConvertTo-JsonResponse 'not_found' 'Use POST /bridge-url.')
-                } else {
-                    $candidate = Get-UrlFromBridgeRequest $context.Request
-                    $queueStatus = Add-BridgeUrl $candidate
-                    Write-BridgeResponse $context 200 (ConvertTo-JsonResponse $queueStatus $queueStatus)
+                    if ($context.Request.HttpMethod -eq 'OPTIONS') {
+                        Write-BridgeResponse $context 204 ''
+                    } elseif ($context.Request.HttpMethod -ne 'POST' -or $context.Request.Url.AbsolutePath -ne '/bridge-url') {
+                        Write-BridgeResponse $context 404 (ConvertTo-JsonResponse 'not_found' 'Use POST /bridge-url.')
+                    } else {
+                        $candidate = Get-UrlFromBridgeRequest $context.Request
+                        $queueStatus = Add-BridgeUrl $candidate
+                        Write-BridgeResponse $context 200 (ConvertTo-JsonResponse $queueStatus $queueStatus)
 
-                    if ($queueStatus -eq 'queued') {
-                        Write-Host ("[Bridge] Queued URL from RED Purchase Links first panel: {0}" -f $candidate) -ForegroundColor Green
+                        if ($queueStatus -eq 'queued') {
+                            Write-Host ("[Bridge] Queued URL from RED Purchase Links first panel: {0}" -f $candidate) -ForegroundColor Green
+                        }
                     }
-                }
+                } while ($contextTask.AsyncWaitHandle.WaitOne(0))
             }
 
             if ($activeBl94 -and $activeBl94.HasExited) {
