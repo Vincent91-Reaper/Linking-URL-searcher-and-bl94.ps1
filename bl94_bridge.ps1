@@ -174,6 +174,15 @@ function Get-BridgePayloadFromRequest {
         $jsonEscapedUrl = $matches[1] -replace '\\/', '/'
         $payload.Url = Get-MusicServiceUrlFromText $jsonEscapedUrl
     }
+    if (-not $payload.SentAtUtc -and $body -match '(?i)"sentAtUtc"\s*:\s*"([^"]+)"') {
+        $payload.SentAtUtc = ConvertFrom-BridgeTimestamp ([string]$matches[1])
+    }
+    if (-not $payload.FirstSeenAtUtc -and $body -match '(?i)"firstSeenAtUtc"\s*:\s*"([^"]+)"') {
+        $payload.FirstSeenAtUtc = ConvertFrom-BridgeTimestamp ([string]$matches[1])
+    }
+    if ($null -eq $payload.AttemptIndex -and $body -match '(?i)"attemptIndex"\s*:\s*(\d+)') {
+        $payload.AttemptIndex = [int]$matches[1]
+    }
 
     if (-not $payload.ServiceLabel -and $body -match '(?i)"serviceLabel"\s*:\s*"([^"]*)"') {
         $payload.ServiceLabel = [string]$matches[1]
@@ -199,7 +208,10 @@ function Add-BridgeUrl {
     # This avoids long delays caused by stale queued URLs.
     if ($activeBl94 -and $queuedUrls.Count -gt 0) {
         while ($queuedUrls.Count -gt 0) {
-            [void]$queuedUrls.Dequeue()
+            $dropped = $queuedUrls.Dequeue()
+            if ($dropped -and $dropped.Url) {
+                Write-Host ("[Bridge][drop {0}] url={1}" -f ([DateTime]::UtcNow.ToString('HH:mm:ss.fff')), $dropped.Url) -ForegroundColor DarkYellow
+            }
         }
     }
 

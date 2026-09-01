@@ -55,6 +55,7 @@
   const DEBUG_RED_PURCHASE_LINKS = false;
   const DEBUG_TOP_CANDIDATES = 8;
   const BL94_BRIDGE_ENDPOINT = "http://127.0.0.1:17894/bridge-url";
+  const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
   const bridgeFirstSeenAtByKey = new Map();
 
   const PANEL_LEFT = "200px";
@@ -400,7 +401,6 @@
 
     const payloadText = JSON.stringify(payload);
     let gmFallbackDispatched = false;
-    let gmFallbackTimer = null;
 
     const dispatchGmFallback = () => {
       if (gmFallbackDispatched) return;
@@ -421,7 +421,7 @@
     };
 
     try {
-      gmFallbackTimer = setTimeout(dispatchGmFallback, BRIDGE_GM_FALLBACK_DELAY_MS);
+      setTimeout(dispatchGmFallback, BRIDGE_GM_FALLBACK_DELAY_MS);
 
       fetch(BL94_BRIDGE_ENDPOINT, {
         method: "POST",
@@ -430,24 +430,11 @@
         body: payloadText,
         keepalive: true
       })
-        .then(() => {
-          if (gmFallbackTimer) {
-            clearTimeout(gmFallbackTimer);
-            gmFallbackTimer = null;
-          }
-        })
+        .then(() => {})
         .catch(() => {
-          if (gmFallbackTimer) {
-            clearTimeout(gmFallbackTimer);
-            gmFallbackTimer = null;
-          }
           dispatchGmFallback();
         });
     } catch {
-      if (gmFallbackTimer) {
-        clearTimeout(gmFallbackTimer);
-        gmFallbackTimer = null;
-      }
       dispatchGmFallback();
     }
   };
@@ -2140,7 +2127,6 @@
       // Only run for RED requests with bounty of at least 200.00 MB.
       // RED stores/displays bounty in binary MB:
       // 200 MB = 200 * 1024 * 1024 = 209715200 bytes.
-      const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
       const totalBountyBytes = Number(response?.totalBounty || 0);
 
       if (totalBountyBytes < MIN_BOUNTY_BYTES) return;
