@@ -547,6 +547,13 @@
   if (IS_RED_REQUEST_PAGE) {
     setInterval(() => {
       const current = { ...(lastRenderState || DEFAULT_RENDER_STATE) };
+      const hasAnyUrl =
+        String(current.qobuz || "").trim() ||
+        String(current.tidal || "").trim() ||
+        String(current.deezer || "").trim() ||
+        String(current.beatport || "").trim();
+      if (!hasAnyUrl) return;
+
       sendFirstPanelUrlsToBridge({
         qobuz: current.qobuz || "",
         tidal: current.tidal || "",
