@@ -137,6 +137,49 @@ function Get-BridgePayloadFromRequest {
         RawBodyLength = ($body | ForEach-Object { [string]$_ }).Length
     }
 
+    function Get-BridgePayloadFromQuery {
+        param([System.Net.HttpListenerRequest]$Request)
+
+        $query = $Request.Url.Query
+        $payload = [ordered]@{
+            Url          = $null
+            Source       = 'RED Purchase Links first panel'
+            SendSource   = ''
+            ServiceLabel = ''
+            SentAtUtc    = $null
+            FirstSeenAtUtc = $null
+            EnqueuedUtc  = $null
+            AttemptIndex = $null
+            RawBodyLength = 0
+        }
+
+        if (-not $query) { return [pscustomobject]$payload }
+
+        try {
+            $raw = $query.TrimStart('?')
+            $pairs = $raw -split '&'
+            $queryMap = @{}
+            foreach ($pair in $pairs) {
+                if (-not $pair) { continue }
+                $kv = $pair -split '=', 2
+                $k = [System.Uri]::UnescapeDataString(([string]$kv[0]).Replace('+', ' '))
+                $v = if ($kv.Count -gt 1) { [System.Uri]::UnescapeDataString(([string]$kv[1]).Replace('+', ' ')) } else { '' }
+                if ($k) { $queryMap[$k] = $v }
+            }
+
+            $payload.Url = Get-MusicServiceUrlFromText ([string]$queryMap['url'])
+            $payload.ServiceLabel = [string]$queryMap['serviceLabel']
+            $payload.SendSource = [string]$queryMap['sendSource']
+            $payload.SentAtUtc = ConvertFrom-BridgeTimestamp ([string]$queryMap['sentAtUtc'])
+            $payload.FirstSeenAtUtc = ConvertFrom-BridgeTimestamp ([string]$queryMap['firstSeenAtUtc'])
+            if ([string]$queryMap['attemptIndex'] -match '^\d+$') {
+                $payload.AttemptIndex = [int]$queryMap['attemptIndex']
+            }
+        } catch {}
+
+        return [pscustomobject]$payload
+    }
+
     if (-not $body) {
         return [pscustomobject]$payload
     }
@@ -302,11 +345,20 @@ try {
 
                     if ($context.Request.HttpMethod -eq 'OPTIONS') {
                         Write-BridgeResponse $context 204 ''
-                    } elseif ($context.Request.HttpMethod -ne 'POST' -or $context.Request.Url.AbsolutePath -ne '/bridge-url') {
-                        Write-BridgeResponse $context 404 (ConvertTo-JsonResponse 'not_found' 'Use POST /bridge-url.')
+                    } elseif ($context.Request.Url.AbsolutePath -ne '/bridge-url') {
+                        Write-BridgeResponse $context 404 (ConvertTo-JsonResponse 'not_found' 'Use POST or GET /bridge-url.')
                     } else {
                         $receivedUtc = [DateTime]::UtcNow
-                        $bridgePayload = Get-BridgePayloadFromRequest $context.Request
+                        $bridgePayload = $null
+                        if ($context.Request.HttpMethod -eq 'POST') {
+                            $bridgePayload = Get-BridgePayloadFromRequest $context.Request
+                        } elseif ($context.Request.HttpMethod -eq 'GET') {
+                            $bridgePayload = Get-BridgePayloadFromQuery $context.Request
+                        } else {
+                            Write-BridgeResponse $context 405 (ConvertTo-JsonResponse 'method_not_allowed' 'Use POST or GET /bridge-url.')
+                            continue
+                        }
+
                         $queueStatus = Add-BridgeUrl $bridgePayload
                         Write-BridgeResponse $context 200 (ConvertTo-JsonResponse $queueStatus $queueStatus)
 

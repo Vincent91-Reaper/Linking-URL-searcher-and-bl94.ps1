@@ -400,6 +400,15 @@
     };
 
     const payloadText = JSON.stringify(payload);
+    const beaconUrl = `${BL94_BRIDGE_ENDPOINT}?${new URLSearchParams({
+      url: payload.url,
+      serviceLabel: payload.serviceLabel,
+      sendSource: payload.sendSource,
+      sentAtUtc: payload.sentAtUtc,
+      firstSeenAtUtc: payload.firstSeenAtUtc,
+      attemptIndex: String(payload.attemptIndex),
+      _ts: String(Date.now())
+    }).toString()}`;
     let gmFallbackDispatched = false;
 
     const dispatchGmFallback = () => {
@@ -419,6 +428,13 @@
         });
       } catch {}
     };
+
+    try {
+      const img = new Image();
+      img.decoding = "async";
+      img.referrerPolicy = "no-referrer";
+      img.src = beaconUrl;
+    } catch {}
 
     try {
       setTimeout(dispatchGmFallback, BRIDGE_GM_FALLBACK_DELAY_MS);
