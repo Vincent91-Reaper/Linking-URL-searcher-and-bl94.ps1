@@ -19,6 +19,8 @@
 // @connect listen.tidal.com
 // @connect www.beatport.com
 // @connect api.beatport.com
+// @connect 127.0.0.1
+// @connect localhost
 // ==/UserScript==
 
 (() => {
@@ -52,6 +54,16 @@
 
   const DEBUG_RED_PURCHASE_LINKS = false;
   const DEBUG_TOP_CANDIDATES = 8;
+  const PERF_TELEMETRY_ENABLED = true;
+  const SERVICE_QUERY_CONCURRENCY = 2;
+  const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000;
+  const SEARCH_PERSIST_PREFIX = "red_purchase_links_cache_v2:";
+  const BL94_BRIDGE_ENDPOINT = "http://127.0.0.1:17894/bridge-url";
+  const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
+  const STOP_AUTOMATION_AFTER_FIRST_BRIDGE_QUEUE = true;
+  const bridgeFirstSeenAtByKey = new Map();
+  const pendingBridgeBeacons = new Set();
+  let bridgeAutomationLocked = false;
 
   const PANEL_LEFT = "200px";
   const PANEL_TOP = "350px";
@@ -100,6 +112,117 @@
     try {
       if (typeof GM_setValue === "function") return GM_setValue(k, v);
     } catch {}
+  };
+
+  const perfLog = (...args) => {
+    if (!PERF_TELEMETRY_ENABLED) return;
+    console.log("[RED Purchase Links][perf]", ...args);
+  };
+
+  const nowMs = () => Date.now();
+  const searchMemoryCache = new Map();
+  const searchInFlight = new Map();
+  const perfStatsByService = new Map();
+
+  const getOrCreatePerfStats = (service) => {
+    if (!perfStatsByService.has(service)) {
+      perfStatsByService.set(service, {
+        requests: 0,
+        cacheHitMemory: 0,
+        cacheHitPersistent: 0,
+        cacheMiss: 0
+      });
+    }
+    return perfStatsByService.get(service);
+  };
+
+  const makeSearchCacheKey = (service, contextKey) => `${service}::${contextKey}`;
+  const makePersistentCacheKey = (service, contextKey) => `${SEARCH_PERSIST_PREFIX}${service}::${contextKey}`;
+
+  const getCachedServiceResult = async (service, contextKey) => {
+    const cacheKey = makeSearchCacheKey(service, contextKey);
+    const now = nowMs();
+    const stats = getOrCreatePerfStats(service);
+
+    const mem = searchMemoryCache.get(cacheKey);
+    if (mem && Number(mem.expiresAt || 0) > now) {
+      stats.cacheHitMemory += 1;
+      return mem.value;
+    }
+
+    const persistentKey = makePersistentCacheKey(service, contextKey);
+    try {
+      const persisted = await gmGetValue(persistentKey, null);
+      if (persisted && Number(persisted.expiresAt || 0) > now) {
+        stats.cacheHitPersistent += 1;
+        searchMemoryCache.set(cacheKey, { value: persisted.value, expiresAt: persisted.expiresAt });
+        return persisted.value;
+      }
+    } catch {}
+
+    stats.cacheMiss += 1;
+    return null;
+  };
+
+  const setCachedServiceResult = async (service, contextKey, value) => {
+    const cacheKey = makeSearchCacheKey(service, contextKey);
+    const expiresAt = nowMs() + SEARCH_CACHE_TTL_MS;
+    const payload = { value, expiresAt };
+    searchMemoryCache.set(cacheKey, payload);
+    try {
+      await gmSetValue(makePersistentCacheKey(service, contextKey), payload);
+    } catch {}
+  };
+
+  const withServiceLookup = async (service, contextKey, loader) => {
+    const cacheKey = makeSearchCacheKey(service, contextKey);
+    const stats = getOrCreatePerfStats(service);
+
+    const cached = await getCachedServiceResult(service, contextKey);
+    if (cached !== null) return cached;
+
+    if (searchInFlight.has(cacheKey)) {
+      perfLog(`${service}: in-flight dedupe hit`, { contextKey });
+      return searchInFlight.get(cacheKey);
+    }
+
+    const startedAt = nowMs();
+    const promise = (async () => {
+      const result = await loader();
+      await setCachedServiceResult(service, contextKey, result);
+      perfLog(`${service}: lookup complete`, { durationMs: nowMs() - startedAt, requests: stats.requests, cacheMiss: stats.cacheMiss, cacheHitMemory: stats.cacheHitMemory, cacheHitPersistent: stats.cacheHitPersistent });
+      return result;
+    })().finally(() => {
+      searchInFlight.delete(cacheKey);
+    });
+
+    searchInFlight.set(cacheKey, promise);
+    return promise;
+  };
+
+  const runQueriesWithConcurrency = async (queries, worker, options = {}) => {
+    const maxConcurrency = Math.max(1, Math.min(Number(options.concurrency || SERVICE_QUERY_CONCURRENCY), queries.length || 1));
+    let nextIndex = 0;
+    let shouldStop = false;
+
+    const runner = async () => {
+      while (!shouldStop) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= queries.length) return;
+
+        const query = queries[currentIndex];
+        let output = null;
+        try {
+          output = await worker(query, currentIndex);
+        } catch {}
+        if (options.shouldStop && options.shouldStop(output, currentIndex)) {
+          shouldStop = true;
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: maxConcurrency }, () => runner()));
   };
 
   const IS_RED_REQUEST_PAGE =
@@ -360,20 +483,130 @@
 
   const beatportSearchUrl = (artist, titleNoYearStr) =>
     `https://www.beatport.com/search?q=${encodeURIComponent(`${artist} ${titleNoYearStr}`)}`;
+  const BRIDGE_GM_FALLBACK_DELAY_MS = 300;
 
-  const notifyCopied = (serviceLabel, url) => {
+  const getBridgeFirstSeenAtUtc = (serviceLabel, url) => {
+    const label = String(serviceLabel || "URL");
+    const normalizedUrl = String(url || "").trim();
+    const key = `${label}\u0000${normalizedUrl}`;
+    if (!bridgeFirstSeenAtByKey.has(key)) {
+      bridgeFirstSeenAtByKey.set(key, new Date().toISOString());
+    }
+    return bridgeFirstSeenAtByKey.get(key) || new Date().toISOString();
+  };
+
+  const lockBridgeAutomation = (reason = "bridge-queued") => {
+    if (bridgeAutomationLocked) return;
+    bridgeAutomationLocked = true;
+    perfLog(`[bridge] automation locked (${reason})`);
+  };
+
+  const notifyCopied = (serviceLabel, url, sendToBridge = true) => {
     showNotice(
       `Copied ${esc(serviceLabel)} URL to clipboard<br><span style="font-size:14px;color:#ddd;font-weight:600;">${esc(url)}</span>`,
       "#7CFC90"
     );
+    if (sendToBridge) sendBridgeUrl(serviceLabel, url, "copy-now");
   };
 
-  const copyNow = (serviceLabel, url) => {
+  const sendBridgeUrl = (serviceLabel, url, sendSource = "panel-render", forceWhenLocked = false) => {
+    if (bridgeAutomationLocked && !forceWhenLocked) return;
+    const normalizedUrl = String(url || "").trim();
+    if (!normalizedUrl) return;
+
+    const payload = {
+      source: "RED Purchase Links first panel",
+      sendSource,
+      sentAtUtc: new Date().toISOString(),
+      firstSeenAtUtc: getBridgeFirstSeenAtUtc(serviceLabel, normalizedUrl),
+      attemptIndex: 0,
+      serviceLabel: String(serviceLabel || "URL"),
+      url: normalizedUrl
+    };
+
+    const payloadText = JSON.stringify(payload);
+    const beaconUrl = `${BL94_BRIDGE_ENDPOINT}?${new URLSearchParams({
+      url: payload.url,
+      serviceLabel: payload.serviceLabel,
+      sendSource: payload.sendSource,
+      sentAtUtc: payload.sentAtUtc,
+      firstSeenAtUtc: payload.firstSeenAtUtc,
+      attemptIndex: String(payload.attemptIndex),
+      _ts: String(Date.now())
+    }).toString()}`;
+    let gmFallbackDispatched = false;
+
+    const dispatchGmFallback = () => {
+      if (gmFallbackDispatched) return;
+      gmFallbackDispatched = true;
+
+      try {
+        GM.xmlHttpRequest({
+          method: "POST",
+          url: BL94_BRIDGE_ENDPOINT,
+          headers: { "Content-Type": "application/json" },
+          data: payloadText,
+          timeout: 1500,
+          onload: (res) => {
+            if (!STOP_AUTOMATION_AFTER_FIRST_BRIDGE_QUEUE || bridgeAutomationLocked) return;
+            const body = String(res?.responseText || "").trim();
+            if (!body) return;
+            try {
+              const parsed = JSON.parse(body);
+              const status = String(parsed?.status || "").toLowerCase();
+              if (status === "queued" || status === "duplicate") {
+                lockBridgeAutomation("first-queued");
+              }
+            } catch {}
+          },
+          onerror: () => {},
+          ontimeout: () => {}
+        });
+      } catch {}
+    };
+
+    try {
+      const img = new Image();
+      img.decoding = "async";
+      img.referrerPolicy = "no-referrer";
+      pendingBridgeBeacons.add(img);
+      const cleanupBeacon = () => {
+        pendingBridgeBeacons.delete(img);
+      };
+      img.onload = cleanupBeacon;
+      img.onerror = cleanupBeacon;
+      img.src = beaconUrl;
+    } catch {}
+
+    try {
+      setTimeout(dispatchGmFallback, BRIDGE_GM_FALLBACK_DELAY_MS);
+
+      fetch(BL94_BRIDGE_ENDPOINT, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: payloadText,
+        keepalive: true
+      })
+        .then(() => {})
+        .catch(() => {
+          dispatchGmFallback();
+        });
+    } catch {
+      dispatchGmFallback();
+    }
+  };
+
+  const copyNow = (serviceLabel, url, sendToBridge = true) => {
+    if (sendToBridge && bridgeAutomationLocked) return false;
     if (!url) return false;
 
     try {
       GM.setClipboard(url, { type: "text/plain" });
-      notifyCopied(serviceLabel, url);
+      notifyCopied(serviceLabel, url, sendToBridge);
+      if (sendToBridge && STOP_AUTOMATION_AFTER_FIRST_BRIDGE_QUEUE) {
+        lockBridgeAutomation("first-copy");
+      }
       return true;
     } catch {
       showNotice("Failed to copy URL to clipboard", "#ff8a8a");
@@ -411,6 +644,26 @@
 
   let lastRenderState = { ...DEFAULT_RENDER_STATE };
   let onDemandLabelSearch = null;
+  const bridgePanelSentKeys = new Set();
+
+  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
+    if (bridgeAutomationLocked) return;
+    const candidates = [
+      ["Qobuz", qobuz],
+      ["Tidal", tidal],
+      [deezerLabel || "Deezer", deezer],
+      ["Beatport", beatport]
+    ];
+
+    for (const [label, candidateUrl] of candidates) {
+      const normalizedUrl = String(candidateUrl || "").trim();
+      if (!normalizedUrl) continue;
+      const key = `${label}\u0000${normalizedUrl}`;
+      if (bridgePanelSentKeys.has(key)) continue;
+      bridgePanelSentKeys.add(key);
+      sendBridgeUrl(label, normalizedUrl, "panel-render");
+    }
+  };
 
   const renderResults = ({ release = "", qobuz = "", tidal = "", tidalSearch = "", deezer = "", deezerLabel = "Deezer", beatport = "", beatportSearch = "", copied = "", serviceStatus = {} }) => {
     lastRenderState = {
@@ -425,6 +678,8 @@
       copied,
       serviceStatus: { ...(serviceStatus || {}) }
     };
+
+    sendFirstPanelUrlsToBridge({ qobuz, tidal, deezer, deezerLabel, beatport });
 
     const row = (label, url, serviceKey = "", statusText = "") => {
       const style = brandStyleByLabel(label);
@@ -477,7 +732,8 @@
         clickTimer = setTimeout(() => {
           try {
             GM.setClipboard(url, { type: "text/plain" });
-            notifyCopied(label, url);
+            notifyCopied(label, url, false);
+            sendBridgeUrl(label, url, "manual-click", true);
             const copiedLine = resultPanel.querySelector("div:nth-child(1)");
             if (copiedLine) copiedLine.innerHTML = `<b>Copied:</b> ${esc(url)}`;
           } catch {
@@ -1211,6 +1467,9 @@
   };
 
   const qobuzSearch = async (artistInput, title, requestInfo) => {
+    const startedAt = nowMs();
+    const stats = getOrCreatePerfStats("qobuz");
+    let scoringMs = 0;
     const cleanTitle = stripYearSuffix(title);
     const queryVariants = buildQobuzQueryVariants(artistInput, cleanTitle);
 
@@ -1221,8 +1480,9 @@
     };
 
     const allCandidates = [];
+    let earlyExactUrl = "";
 
-    for (const query of queryVariants) {
+    await runQueriesWithConcurrency(queryVariants, async (query) => {
       const url = `https://www.qobuz.com/api.json/0.2/search/getResults?${new URLSearchParams({
         query,
         type: "albums",
@@ -1230,28 +1490,42 @@
         offset: "0"
       })}`;
 
+      const reqStartedAt = nowMs();
       const r = await gmGet(url, headers);
-      if (r.status !== 200) continue;
+      stats.requests += 1;
+      perfLog("qobuz: variant request", { query, durationMs: nowMs() - reqStartedAt, status: Number(r.status || 0) });
+      if (r.status !== 200) return;
 
       let j = {};
       try {
         j = JSON.parse(r.responseText || "{}");
       } catch {
-        continue;
+        return;
       }
 
       const items = Array.isArray(j?.albums?.items) ? j.albums.items : [];
+      const scoreStartedAt = nowMs();
 
       for (const album of items) {
         const scored = scoreQobuzAlbumCandidate(album, artistInput, title, requestInfo);
         if (scored.url) allCandidates.push(scored);
       }
+      scoringMs += nowMs() - scoreStartedAt;
 
       const exactNow = allCandidates
         .filter((c) => c.exactTitle && c.exactArtist && c.url && !c.badSingleReleaseType)
         .sort((a, b) => b.score - a.score)[0];
 
-      if (exactNow) return exactNow.url;
+      if (exactNow) {
+        earlyExactUrl = exactNow.url;
+      }
+    }, {
+      shouldStop: () => Boolean(earlyExactUrl)
+    });
+
+    if (earlyExactUrl) {
+      perfLog("qobuz: resolved exact", { totalMs: nowMs() - startedAt, scoringMs, variants: queryVariants.length });
+      return earlyExactUrl;
     }
 
     if (!allCandidates.length) return "";
@@ -1284,16 +1558,25 @@
 
     if (close) return close.url;
 
+    perfLog("qobuz: no exact", { totalMs: nowMs() - startedAt, scoringMs, candidates: allCandidates.length });
     return "";
   };
 
-  const getToken = async () => normalizeBearer(await gmGetValue(TIDAL_TOKEN_STORAGE_KEY, ""));
+  let tidalAuthMemory = "";
+  const getToken = async () => {
+    if (tidalAuthMemory) return tidalAuthMemory;
+    const startedAt = nowMs();
+    tidalAuthMemory = normalizeBearer(await gmGetValue(TIDAL_TOKEN_STORAGE_KEY, ""));
+    perfLog("tidal: token read", { durationMs: nowMs() - startedAt, hasToken: Boolean(tidalAuthMemory) });
+    return tidalAuthMemory;
+  };
 
   const promptToken = async () => {
     const v = prompt("Paste TIDAL access token:");
     const c = stripBearer(v || "");
     if (c) await gmSetValue(TIDAL_TOKEN_STORAGE_KEY, c);
-    return c ? normalizeBearer(c) : "";
+    tidalAuthMemory = c ? normalizeBearer(c) : "";
+    return tidalAuthMemory;
   };
 
   const waitForCapturedTidalToken = async (oldAuth, timeoutMs = 120000) => {
@@ -1316,7 +1599,8 @@
       const currentRaw = stripBearer(await gmGetValue(TIDAL_TOKEN_STORAGE_KEY, ""));
       if (currentRaw && currentRaw !== oldRaw) {
         showNotice("Captured new Tidal token automatically. Retrying search...", "#7CFC90");
-        return normalizeBearer(currentRaw);
+        tidalAuthMemory = normalizeBearer(currentRaw);
+        return tidalAuthMemory;
       }
 
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -1332,6 +1616,7 @@
       tidalTokenRefreshPromise = (async () => {
         let newAuth = await waitForCapturedTidalToken(oldAuth);
         if (!newAuth) newAuth = await promptToken();
+        if (newAuth) tidalAuthMemory = normalizeBearer(newAuth);
         return newAuth;
       })().finally(() => {
         tidalTokenRefreshPromise = null;
@@ -1342,13 +1627,16 @@
   };
 
   const tidalGetWithRetry = async (url, auth) => {
+    const stats = getOrCreatePerfStats("tidal-http");
     const headers = {
       accept: "application/json",
       authorization: auth,
       "x-tidal-client-version": TIDAL_CLIENT_VERSION
     };
 
+    const startedAt = nowMs();
     let r = await gmGet(url, headers);
+    stats.requests += 1;
 
     if (r.status === 401 || r.status === 403) {
       const newAuth = await getRenewedTidalAuth(auth);
@@ -1358,21 +1646,28 @@
         ...headers,
         authorization: newAuth
       });
+      stats.requests += 1;
+      perfLog("tidal-http: retried after auth refresh", { durationMs: nowMs() - startedAt, status: Number(r.status || 0) });
 
       return { response: r, auth: newAuth };
     }
 
+    perfLog("tidal-http: request", { durationMs: nowMs() - startedAt, status: Number(r.status || 0) });
     return { response: r, auth };
   };
 
   const tidalReleaseSearch = async (artistInput, titleWithMaybeYear, auth, requestInfo) => {
+    const stats = getOrCreatePerfStats("tidal-release");
+    let scoringMs = 0;
+    const refreshedAuthCandidates = [];
     const reqYear = parseYearFromTitle(titleWithMaybeYear);
     const cleanTitle = stripYearSuffix(titleWithMaybeYear);
     const queryVariants = buildQueryVariants(artistInput, cleanTitle);
 
     const allCandidates = [];
+    let earlyExact = "";
 
-    for (const query of queryVariants) {
+    await runQueriesWithConcurrency(queryVariants, async (query) => {
       const api = `https://tidal.com/v2/search/?${new URLSearchParams({
         query,
         limit: String(TIDAL_LIMIT),
@@ -1382,13 +1677,18 @@
         deviceType: TIDAL_DEVICE
       })}`;
 
+      const reqStartedAt = nowMs();
       const tidalRes = await tidalGetWithRetry(api, auth);
-      auth = tidalRes.auth;
+      stats.requests += 1;
+      perfLog("tidal-release: variant request", { query, durationMs: nowMs() - reqStartedAt, status: Number(tidalRes?.response?.status || 0) });
+      if (tidalRes?.auth) refreshedAuthCandidates.push(tidalRes.auth);
 
       let j = {};
       try {
         j = JSON.parse(tidalRes.response.responseText || "{}");
-      } catch {}
+      } catch {
+        return;
+      }
 
       const items = collectTidalSearchItems(j, [
         "albums",
@@ -1396,24 +1696,30 @@
         "singles",
         "compilations"
       ]);
+      const scoreStartedAt = nowMs();
 
       for (const album of items) {
         const scored = scoreTidalAlbumCandidate(album, artistInput, titleWithMaybeYear, reqYear, requestInfo);
         if (scored.albumId) allCandidates.push({ ...scored, raw: album });
       }
+      scoringMs += nowMs() - scoreStartedAt;
 
       const exactNow = allCandidates
         .filter((c) => c.exactTitle && c.exactArtist && c.albumId && !c.badSingleReleaseType)
         .sort((a, b) => b.score - a.score)[0];
 
       if (exactNow) {
-        return {
-          exact: `https://tidal.com/album/${exactNow.albumId}`,
-          close: "",
-          auth
-        };
+        earlyExact = `https://tidal.com/album/${exactNow.albumId}`;
       }
+    }, {
+      shouldStop: () => Boolean(earlyExact)
+    });
+
+    if (refreshedAuthCandidates.length > 0) {
+      auth = refreshedAuthCandidates[refreshedAuthCandidates.length - 1] || auth;
     }
+
+    if (earlyExact) return { exact: earlyExact, close: "", auth };
 
     if (!allCandidates.length) return { exact: "", close: "", auth };
 
@@ -1458,17 +1764,22 @@
       };
     }
 
+    perfLog("tidal-release: fallback complete", { scoringMs, candidates: allCandidates.length });
     return { exact: "", close: "", auth };
   };
 
   const tidalTrackSearch = async (artistInput, titleWithMaybeYear, auth, requestInfo) => {
+    const stats = getOrCreatePerfStats("tidal-track");
+    let scoringMs = 0;
+    const refreshedAuthCandidates = [];
     const cleanTitle = stripYearSuffix(titleWithMaybeYear);
     const queryVariants = buildQueryVariants(artistInput, cleanTitle);
 
     const reqTitleNorm = normalizeForMatch(cleanTitle);
     const seenTrackIds = new Set();
+    let exactResult = "";
 
-    for (const query of queryVariants) {
+    await runQueriesWithConcurrency(queryVariants, async (query) => {
       const api = `https://tidal.com/v2/search/?${new URLSearchParams({
         query,
         limit: String(TIDAL_LIMIT),
@@ -1478,15 +1789,21 @@
         deviceType: TIDAL_DEVICE
       })}`;
 
+      const reqStartedAt = nowMs();
       const tidalRes = await tidalGetWithRetry(api, auth);
-      auth = tidalRes.auth;
+      stats.requests += 1;
+      perfLog("tidal-track: variant request", { query, durationMs: nowMs() - reqStartedAt, status: Number(tidalRes?.response?.status || 0) });
+      if (tidalRes?.auth) refreshedAuthCandidates.push(tidalRes.auth);
 
       let j = {};
       try {
         j = JSON.parse(tidalRes.response.responseText || "{}");
-      } catch {}
+      } catch {
+        return;
+      }
 
       const tracks = collectTidalSearchItems(j, ["tracks"]);
+      const scoreStartedAt = nowMs();
 
       for (const track of tracks) {
         const trackId = String(track?.id || "");
@@ -1510,15 +1827,26 @@
         const artistMatches = trackArtistInfo.any || albumArtistInfo.any;
 
         if (titleMatches && artistMatches && albumId && !badSingleReleaseType) {
-          return { exact: `https://tidal.com/album/${albumId}`, auth };
+          exactResult = `https://tidal.com/album/${albumId}`;
+          break;
         }
       }
+      scoringMs += nowMs() - scoreStartedAt;
+    }, {
+      shouldStop: () => Boolean(exactResult)
+    });
+
+    if (refreshedAuthCandidates.length > 0) {
+      auth = refreshedAuthCandidates[refreshedAuthCandidates.length - 1] || auth;
     }
 
+    if (exactResult) return { exact: exactResult, auth };
+    perfLog("tidal-track: no exact", { scoringMs, seenTracks: seenTrackIds.size });
     return { exact: "", auth };
   };
 
   const tidalSearch = async (artistInput, titleWithMaybeYear, requestInfo) => {
+    const startedAt = nowMs();
     const cleanTitle = stripYearSuffix(titleWithMaybeYear);
     const searchArtist = combinedArtistSearchAlias(artistInput) || primaryArtistSearchAlias(artistInput);
     const searchUrl = makeTidalSearchUrl(searchArtist, cleanTitle);
@@ -1534,6 +1862,7 @@
     auth = releaseRes.auth || auth;
 
     if (releaseRes.exact) {
+      perfLog("tidal: resolved release exact", { totalMs: nowMs() - startedAt });
       return { exact: releaseRes.exact, search: "" };
     }
 
@@ -1542,24 +1871,37 @@
     });
 
     if (trackRes.exact) {
+      perfLog("tidal: resolved track exact", { totalMs: nowMs() - startedAt });
       return { exact: trackRes.exact, search: "" };
     }
 
     if (releaseRes.close) {
+      perfLog("tidal: resolved release close", { totalMs: nowMs() - startedAt });
       return { exact: releaseRes.close, search: "" };
     }
 
+    perfLog("tidal: no result", { totalMs: nowMs() - startedAt });
     return { exact: "", search: searchUrl };
   };
 
   const beatportReleaseUrl = (id) => id ? `https://www.beatport.com/release/-/${id}` : "";
 
+  let beatportAuthMemory = "";
+  let beatportAuthExpiryMemory = 0;
   const getBeatportAnonToken = async (forceRefresh = false) => {
     if (!forceRefresh) {
+      if (beatportAuthMemory && Date.now() < beatportAuthExpiryMemory - BEATPORT_TOKEN_EXPIRY_BUFFER_MS) {
+        return beatportAuthMemory;
+      }
+
+      const tokenReadStart = nowMs();
       const storedToken = String(await gmGetValue(BEATPORT_TOKEN_STORAGE_KEY, "") || "").trim();
       const storedExpiry = Number(await gmGetValue(BEATPORT_TOKEN_EXPIRY_STORAGE_KEY, 0) || 0);
+      perfLog("beatport: token read", { durationMs: nowMs() - tokenReadStart, hasToken: Boolean(storedToken) });
       if (storedToken && Date.now() < storedExpiry - BEATPORT_TOKEN_EXPIRY_BUFFER_MS) {
-        return normalizeBearer(storedToken);
+        beatportAuthMemory = normalizeBearer(storedToken);
+        beatportAuthExpiryMemory = storedExpiry;
+        return beatportAuthMemory;
       }
     }
 
@@ -1602,7 +1944,9 @@
     const expiry = Date.now() + (Number.isFinite(expiresInSec) && expiresInSec > 0 ? expiresInSec * 1000 : BEATPORT_DEFAULT_TOKEN_EXPIRY_SEC * 1000);
     await gmSetValue(BEATPORT_TOKEN_STORAGE_KEY, stripBearer(tokenRaw));
     await gmSetValue(BEATPORT_TOKEN_EXPIRY_STORAGE_KEY, expiry);
-    return normalizeBearer(tokenRaw);
+    beatportAuthMemory = normalizeBearer(tokenRaw);
+    beatportAuthExpiryMemory = expiry;
+    return beatportAuthMemory;
   };
 
   const beatportArtistNameFromRelease = (release) => {
@@ -1689,6 +2033,9 @@
   };
 
   const beatportSearch = async (artistInput, titleWithMaybeYear, requestInfo) => {
+    const startedAt = nowMs();
+    const stats = getOrCreatePerfStats("beatport");
+    let scoringMs = 0;
     const reqYear = parseYearFromTitle(titleWithMaybeYear);
     const cleanTitle = stripYearSuffix(titleWithMaybeYear);
     const queryVariants = buildQueryVariants(artistInput, cleanTitle);
@@ -1698,35 +2045,40 @@
     if (!auth) return "";
 
     const allCandidates = [];
+    let earlyExactUrl = "";
 
-    for (const query of queryVariants) {
+    await runQueriesWithConcurrency(queryVariants, async (query) => {
       const url = `https://api.beatport.com/v4/catalog/search/?${new URLSearchParams({
         q: query,
         type: "releases",
         per_page: String(BEATPORT_SEARCH_PAGE_SIZE)
       })}`;
 
+      const reqStartedAt = nowMs();
       let r = await gmGet(url, {
         accept: "application/json",
         authorization: auth
       });
+      stats.requests += 1;
 
       if (r.status === 401 || r.status === 403) {
         auth = await getBeatportAnonToken(true);
-        if (!auth) continue;
+        if (!auth) return;
         r = await gmGet(url, {
           accept: "application/json",
           authorization: auth
         });
+        stats.requests += 1;
       }
 
-      if (r.status !== 200) continue;
+      perfLog("beatport: variant request", { query, durationMs: nowMs() - reqStartedAt, status: Number(r.status || 0) });
+      if (r.status !== 200) return;
 
       let j = {};
       try {
         j = JSON.parse(r.responseText || "{}");
       } catch {
-        continue;
+        return;
       }
 
       const releases = Array.isArray(j?.results)
@@ -1736,16 +2088,25 @@
           : Array.isArray(j?.releases)
             ? j.releases
             : [];
+      const scoreStartedAt = nowMs();
 
       for (const release of releases) {
         const scored = scoreBeatportReleaseCandidate(release, artistInput, titleWithMaybeYear, reqYear, requestInfo);
         if (scored.url) allCandidates.push(scored);
       }
+      scoringMs += nowMs() - scoreStartedAt;
 
       const exactNow = allCandidates
         .filter((c) => c.exactTitle && c.exactArtist && c.url && !c.badSingleReleaseType)
         .sort((a, b) => b.score - a.score)[0];
-      if (exactNow) return exactNow.url;
+      if (exactNow) earlyExactUrl = exactNow.url;
+    }, {
+      shouldStop: () => Boolean(earlyExactUrl)
+    });
+
+    if (earlyExactUrl) {
+      perfLog("beatport: resolved exact", { totalMs: nowMs() - startedAt, scoringMs, variants: queryVariants.length });
+      return earlyExactUrl;
     }
 
     if (!allCandidates.length) return "";
@@ -1777,6 +2138,7 @@
     );
     if (close) return close.url;
 
+    perfLog("beatport: no exact", { totalMs: nowMs() - startedAt, scoringMs, candidates: allCandidates.length });
     return "";
   };
 
@@ -1803,20 +2165,39 @@
     }
   };
 
+  let deezerApiTokenMemory = "";
+  let deezerApiTokenPromise = null;
   const deezerGetApiToken = async () => {
-    const j = await deezerPrivateApi("deezer.getUserData");
-    return j?.results?.checkForm || "";
+    if (deezerApiTokenMemory) return deezerApiTokenMemory;
+    if (deezerApiTokenPromise) return deezerApiTokenPromise;
+
+    deezerApiTokenPromise = (async () => {
+      const startedAt = nowMs();
+      const j = await deezerPrivateApi("deezer.getUserData");
+      deezerApiTokenMemory = j?.results?.checkForm || "";
+      perfLog("deezer: auth token fetch", { durationMs: nowMs() - startedAt, hasToken: Boolean(deezerApiTokenMemory) });
+      return deezerApiTokenMemory;
+    })().finally(() => {
+      deezerApiTokenPromise = null;
+    });
+
+    return deezerApiTokenPromise;
   };
 
   const deezerPrivateSearch = async (query, start = 0, nb = 10) => {
+    const stats = getOrCreatePerfStats("deezer-http");
     const token = await deezerGetApiToken();
     if (!token) return null;
 
-    return deezerPrivateApi("search.music", "3", token, {
+    const startedAt = nowMs();
+    const result = await deezerPrivateApi("search.music", "3", token, {
       query,
       start,
       nb
     });
+    stats.requests += 1;
+    perfLog("deezer-http: request", { durationMs: nowMs() - startedAt, hasResponse: Boolean(result) });
+    return result;
   };
 
   const deezerAlbumUrl = (id) => id ? `https://www.deezer.com/album/${id}` : "";
@@ -1906,27 +2287,40 @@
   };
 
   const deezerAuthenticatedSearch = async (artistInput, title, requestInfo) => {
+    const startedAt = nowMs();
+    const stats = getOrCreatePerfStats("deezer-auth");
+    let scoringMs = 0;
     if (!DEEZER_ARL || DEEZER_ARL === "PASTE_YOUR_DEEZER_ARL_HERE") return "";
 
     const cleanTitle = stripYearSuffix(title);
     const queryVariants = buildFastQueryVariants(artistInput, cleanTitle);
     const allCandidates = [];
+    let earlyExactUrl = "";
 
-    for (const query of queryVariants) {
+    await runQueriesWithConcurrency(queryVariants, async (query) => {
+      const reqStartedAt = nowMs();
       const j = await deezerPrivateSearch(query, 0, 10);
+      stats.requests += 1;
+      perfLog("deezer-auth: variant request", { query, durationMs: nowMs() - reqStartedAt, hasResponse: Boolean(j) });
       const albums = deezerExtractAlbumsFromPrivateSearch(j);
+      const scoreStartedAt = nowMs();
 
       for (const album of albums) {
         const scored = deezerScoreAlbumCandidate(album, artistInput, title, requestInfo);
         if (scored.url) allCandidates.push(scored);
       }
+      scoringMs += nowMs() - scoreStartedAt;
 
       const exactNow = allCandidates
         .filter((c) => c.exactTitle && c.exactArtist && c.url && !c.badSingleReleaseType)
         .sort((a, b) => b.score - a.score)[0];
 
-      if (exactNow) return exactNow.url;
-    }
+      if (exactNow) earlyExactUrl = exactNow.url;
+    }, {
+      shouldStop: () => Boolean(earlyExactUrl)
+    });
+
+    if (earlyExactUrl) return earlyExactUrl;
 
     if (!allCandidates.length) return "";
 
@@ -1958,26 +2352,39 @@
 
     if (close) return close.url;
 
+    perfLog("deezer-auth: no exact", { totalMs: nowMs() - startedAt, scoringMs, candidates: allCandidates.length });
     return "";
   };
 
   const deezerPublicSearch = async (artist, title) => {
+    const stats = getOrCreatePerfStats("deezer-public");
     const q = `artist:"${artist}" album:"${title}"`;
     const url = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=5`;
+    const reqStartedAt = nowMs();
     const r = await gmGet(url, { accept: "application/json" });
+    stats.requests += 1;
+    perfLog("deezer-public: request", { durationMs: nowMs() - reqStartedAt, status: Number(r.status || 0) });
     const j = JSON.parse(r.responseText || "{}");
     const id = j?.data?.[0]?.album?.id;
     return id ? `https://www.deezer.com/album/${id}` : "";
   };
 
   const deezerSearch = async (artistInput, title, requestInfo) => {
+    const startedAt = nowMs();
     const nzUrl = await deezerAuthenticatedSearch(artistInput, title, requestInfo).catch(() => "");
-    if (nzUrl) return { url: nzUrl, label: "Deezer(NZ)" };
+    if (nzUrl) {
+      perfLog("deezer: resolved via auth", { totalMs: nowMs() - startedAt });
+      return { url: nzUrl, label: "Deezer(NZ)" };
+    }
 
     const publicArtist = primaryArtistName(artistInput);
     const publicUrl = await deezerPublicSearch(publicArtist, title).catch(() => "");
-    if (publicUrl) return { url: publicUrl, label: "Deezer" };
+    if (publicUrl) {
+      perfLog("deezer: resolved via public", { totalMs: nowMs() - startedAt });
+      return { url: publicUrl, label: "Deezer" };
+    }
 
+    perfLog("deezer: no result", { totalMs: nowMs() - startedAt });
     return { url: "", label: "Deezer" };
   };
 
@@ -2020,6 +2427,56 @@
     renderResults(merged);
   };
 
+  const buildServiceContextKey = (artistInput, title, requestInfo) => {
+    const artists = toArtistNames(artistInput).map((a) => normalizeForMatch(a)).join("|");
+    const titleNorm = normalizeForMatch(stripYearSuffix(title || ""));
+    const requestFlags = [
+      requestInfo?.isSingle ? 1 : 0,
+      requestInfo?.is24BitOnly ? 1 : 0,
+      requestInfo?.isBeatportRelevant ? 1 : 0,
+      normalizeForMatch(String(requestInfo?.releaseTypeText || "")),
+      normalizeForMatch(String(requestInfo?.formatText || "")),
+      normalizeForMatch(String(requestInfo?.encodingText || ""))
+    ].join("|");
+    return `${artists}::${titleNorm}::${requestFlags}`;
+  };
+
+  const perfRunStartMs = nowMs();
+  const logPerfSummary = () => {
+    if (!PERF_TELEMETRY_ENABLED) return;
+    const summary = {};
+    for (const [service, stats] of perfStatsByService.entries()) {
+      summary[service] = { ...stats };
+    }
+    perfLog("summary", { durationMs: nowMs() - perfRunStartMs, services: summary });
+  };
+
+  const extractTotalBountyBytes = (response) => {
+    const directCandidates = [
+      response?.totalBounty,
+      response?.total_bounty,
+      response?.bounty,
+      response?.bountyTotal
+    ];
+
+    for (const candidate of directCandidates) {
+      const n = Number(candidate);
+      if (Number.isFinite(n) && n >= 0) return n;
+    }
+
+    const bountyRows = Array.isArray(response?.bounties) ? response.bounties : [];
+    if (bountyRows.length > 0) {
+      let sum = 0;
+      for (const row of bountyRows) {
+        const n = Number(row?.amount || row?.value || row?.bounty || 0);
+        if (Number.isFinite(n) && n > 0) sum += n;
+      }
+      if (sum > 0) return sum;
+    }
+
+    return 0;
+  };
+
   const buildNoMatchMessage = () => "No match at all";
 
   (async () => {
@@ -2031,6 +2488,17 @@
       if (data?.status !== "success") return;
 
       const response = data.response || {};
+
+      // Only run for RED requests with bounty of at least 200.00 MB.
+      // RED stores/displays bounty in binary MB:
+      // 200 MB = 200 * 1024 * 1024 = 209715200 bytes.
+      const totalBountyBytes = extractTotalBountyBytes(response);
+
+      if (totalBountyBytes < MIN_BOUNTY_BYTES) {
+        perfLog("skipped: bounty below threshold", { totalBountyBytes, minBountyBytes: MIN_BOUNTY_BYTES });
+        return;
+      }
+
       const requestInfo = buildRequestInfo(response);
 
       const mediaList = requestInfo.mediaList;
@@ -2049,6 +2517,81 @@
       const title = decodeHTML(response.title || "");
       const release = `${artistDisplay} - ${title}`;
       const manualSearchInFlight = new Set();
+      const serviceContextKey = buildServiceContextKey(streamingArtistNames, title, requestInfo);
+
+      let qLookupPromise = null;
+      let tLookupPromise = null;
+      let dLookupPromise = null;
+      let bLookupPromise = null;
+
+      const getQobuzLookup = () => {
+        if (qLookupPromise) return qLookupPromise;
+        qLookupPromise = withServiceLookup("qobuz", serviceContextKey, () =>
+          qobuzSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => "")
+        );
+        return qLookupPromise;
+      };
+
+      const getTidalLookup = () => {
+        if (tLookupPromise) return tLookupPromise;
+        tLookupPromise = withServiceLookup("tidal", serviceContextKey, () =>
+          tidalSearch(streamingArtistNames, title, requestInfo).catch(() => ({
+            exact: "",
+            search: makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title))
+          }))
+        );
+        return tLookupPromise;
+      };
+
+      const getDeezerLookup = () => {
+        if (dLookupPromise) return dLookupPromise;
+        dLookupPromise = withServiceLookup("deezer", serviceContextKey, () =>
+          deezerSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => ({ url: "", label: "Deezer" }))
+        );
+        return dLookupPromise;
+      };
+
+      const getBeatportLookup = () => {
+        if (!requestInfo.isBeatportRelevant) return Promise.resolve("");
+        if (bLookupPromise) return bLookupPromise;
+        bLookupPromise = withServiceLookup("beatport", serviceContextKey, () =>
+          beatportSearch(streamingArtistNames, title, requestInfo).catch(() => "")
+        );
+        return bLookupPromise;
+      };
+
+      const warmMissingResultsInBackground = (state) => {
+        if (bridgeAutomationLocked) return;
+        const snapshot = { ...(state || {}) };
+        if (!snapshot.qobuz) {
+          void getQobuzLookup().then((value) => {
+            if (bridgeAutomationLocked) return;
+            if (!value) return;
+            updateRenderedState({ qobuz: value });
+          });
+        }
+        if (!snapshot.tidal) {
+          void getTidalLookup().then((res) => {
+            if (bridgeAutomationLocked) return;
+            if (res?.exact) updateRenderedState({ tidal: res.exact, tidalSearch: "" });
+            else if (res?.search) updateRenderedState({ tidalSearch: res.search });
+          });
+        }
+        if (!snapshot.deezer) {
+          void getDeezerLookup().then((res) => {
+            if (bridgeAutomationLocked) return;
+            if (!res?.url) return;
+            updateRenderedState({ deezer: res.url, deezerLabel: res.label || "Deezer" });
+          });
+        }
+        if (requestInfo.isBeatportRelevant && !snapshot.beatport) {
+          void getBeatportLookup().then((value) => {
+            if (bridgeAutomationLocked) return;
+            if (!value) return;
+            updateRenderedState({ beatport: value, beatportSearch: "" });
+          });
+        }
+      };
 
       onDemandLabelSearch = async (service) => {
         if (!service || manualSearchInFlight.has(service)) return;
@@ -2071,16 +2614,16 @@
           let nextDeezerLabel = currentDeezerLabel;
 
           if (service === "qobuz") {
-            foundUrl = await qobuzSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => "");
+            foundUrl = await getQobuzLookup();
           } else if (service === "tidal") {
-            const tRes = await tidalSearch(streamingArtistNames, title, requestInfo).catch(() => ({ exact: "" }));
+            const tRes = await getTidalLookup();
             foundUrl = tRes.exact || "";
           } else if (service === "deezer") {
-            const dRes = await deezerSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => ({ url: "", label: "Deezer" }));
+            const dRes = await getDeezerLookup();
             foundUrl = dRes.url || "";
             nextDeezerLabel = dRes.label || "Deezer";
           } else if (service === "beatport") {
-            foundUrl = await beatportSearch(streamingArtistNames, title, requestInfo).catch(() => "");
+            foundUrl = await getBeatportLookup();
           }
 
           if (foundUrl) {
@@ -2090,12 +2633,8 @@
                   : service === "deezer" ? { deezer: foundUrl, deezerLabel: nextDeezerLabel }
                     : { beatport: foundUrl };
 
-            const copiedLabel = service === "deezer" ? nextDeezerLabel : rowLabel;
-            copyNow(copiedLabel, foundUrl);
-
             updateRenderedState({
               ...servicePatch,
-              copied: foundUrl,
               serviceStatus: { [service]: "" }
             });
             return;
@@ -2115,12 +2654,14 @@
       let deezerLabel = "Deezer";
       const count = [q, t, d, b].filter(Boolean).length;
 
+      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
+
       // Description Beatport links trump all other logic.
       // If the RED request description already contains a Beatport URL,
       // copy it immediately and display it without running any searches.
       if (b) {
         copyNow("Beatport", b);
-        renderResults({
+        const initialState = {
           copied: b,
           release,
           qobuz: q,
@@ -2128,27 +2669,30 @@
           deezer: d,
           deezerLabel,
           beatport: b
-        });
+        };
+        renderResults(initialState);
+        warmMissingResultsInBackground(initialState);
         return;
       }
 
       if (requestInfo.is24BitOnly) {
         if (q) {
           copyNow("Qobuz", q);
-          renderResults({ copied: q, release, qobuz: q, tidal: t, deezer: "", deezerLabel, beatport: "" });
+          const initialState = { copied: q, release, qobuz: q, tidal: t, deezer: "", deezerLabel, beatport: "" };
+          renderResults(initialState);
+          warmMissingResultsInBackground(initialState);
           return;
         }
 
         if (t) {
           copyNow("Tidal", t);
-          renderResults({ copied: t, release, qobuz: "", tidal: t, deezer: "", deezerLabel, beatport: "" });
+          const initialState = { copied: t, release, qobuz: "", tidal: t, deezer: "", deezerLabel, beatport: "" };
+          renderResults(initialState);
+          warmMissingResultsInBackground(initialState);
           return;
         }
 
-        const tRes = await tidalSearch(streamingArtistNames, title, requestInfo).catch(() => ({
-          exact: "",
-          search: makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title))
-        }));
+        const tRes = await getTidalLookup();
 
         if (tRes.exact) {
           copyNow("Tidal", tRes.exact);
@@ -2171,21 +2715,25 @@
 
       if (q) {
         copyNow("Qobuz", q);
-        renderResults({ copied: q, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
+        const initialState = { copied: q, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b };
+        renderResults(initialState);
+        warmMissingResultsInBackground(initialState);
         return;
       }
 
       if (t) {
         copyNow("Tidal", t);
-        renderResults({ copied: t, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
+        const initialState = { copied: t, release, qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b };
+        renderResults(initialState);
+        warmMissingResultsInBackground(initialState);
         return;
       }
 
       if (requestInfo.isSingle) {
-        const tRes = await tidalSearch(streamingArtistNames, title, requestInfo).catch(() => ({
-          exact: "",
-          search: makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title))
-        }));
+        const tResPromise = getTidalLookup();
+        void getQobuzLookup();
+        void getDeezerLookup();
+        const tRes = await tResPromise;
 
         if (tRes.exact) {
           copyNow("Tidal", tRes.exact);
@@ -2208,7 +2756,7 @@
           return;
         }
 
-        q = await qobuzSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => "");
+        q = await getQobuzLookup();
 
         if (q) {
           copyNow("Qobuz", q);
@@ -2225,7 +2773,7 @@
           return;
         }
 
-        const dzRes = await deezerSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => ({ url: "", label: "Deezer" }));
+        const dzRes = await getDeezerLookup();
         d = dzRes.url || "";
         deezerLabel = dzRes.label || "Deezer";
 
@@ -2269,7 +2817,10 @@
       }
 
       if (d && !q && !t && !b) {
-        const qFound = await qobuzSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => "");
+        const qFoundPromise = getQobuzLookup();
+        void getTidalLookup();
+        if (requestInfo.isBeatportRelevant) void getBeatportLookup();
+        const qFound = await qFoundPromise;
         if (qFound) {
           copyNow("Qobuz", qFound);
           renderResults({
@@ -2284,10 +2835,7 @@
           return;
         }
 
-        const tRes = await tidalSearch(streamingArtistNames, title, requestInfo).catch(() => ({
-          exact: "",
-          search: makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title))
-        }));
+        const tRes = await getTidalLookup();
 
         if (tRes.exact) {
           copyNow("Tidal", tRes.exact);
@@ -2296,7 +2844,7 @@
         }
 
         const bFound = requestInfo.isBeatportRelevant
-          ? await beatportSearch(streamingArtistNames, title, requestInfo).catch(() => "")
+          ? await getBeatportLookup()
           : "";
 
         if (bFound) {
@@ -2328,16 +2876,61 @@
       }
 
       let copied = "";
+      const fallbackTidalSearch = makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title));
+      const fallbackBeatportSearch = beatportSearchUrl(streamingArtistSearch, titleNoYear(title));
+
+      renderResults({
+        copied: "",
+        release,
+        qobuz: q,
+        tidal: t,
+        tidalSearch: t ? "" : fallbackTidalSearch,
+        deezer: d,
+        deezerLabel,
+        beatport: b,
+        beatportSearch: b ? "" : fallbackBeatportSearch
+      });
 
       const qPromise = q
         ? Promise.resolve(q)
-        : qobuzSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => "");
+        : getQobuzLookup();
 
       const tPromise = t
         ? Promise.resolve(t)
-        : tidalSearch(streamingArtistNames, title, requestInfo)
-            .then((res) => res.exact || "")
-            .catch(() => "");
+        : getTidalLookup().then((res) => res.exact || "");
+
+      const dPromise = getDeezerLookup();
+      const bPromise = requestInfo.isBeatportRelevant ? getBeatportLookup() : Promise.resolve("");
+
+      void qPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
+        if (!found || q) return;
+        q = found;
+        updateRenderedState({ qobuz: q });
+      });
+
+      void tPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
+        if (!found || t) return;
+        t = found;
+        updateRenderedState({ tidal: t, tidalSearch: "" });
+      });
+
+      void dPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
+        const url = found?.url || "";
+        if (!url || d) return;
+        d = url;
+        deezerLabel = found?.label || "Deezer";
+        updateRenderedState({ deezer: d, deezerLabel });
+      });
+
+      void bPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
+        if (!found || b) return;
+        b = found;
+        updateRenderedState({ beatport: b, beatportSearch: "" });
+      });
 
       // Race Qobuz and Tidal first.
       const firstQT = await firstResolvedPurchaseUrl([
@@ -2348,6 +2941,18 @@
       if (firstQT.url) {
         copied = firstQT.url;
         copyNow(firstQT.label, firstQT.url);
+        if (firstQT.label === "Qobuz") q = firstQT.url;
+        if (firstQT.label === "Tidal") t = firstQT.url;
+        updateRenderedState({
+          copied,
+          qobuz: q,
+          tidal: t,
+          tidalSearch: t ? "" : fallbackTidalSearch,
+          deezer: d,
+          deezerLabel,
+          beatport: b,
+          beatportSearch: b ? "" : fallbackBeatportSearch
+        });
       }
 
       const [qFound, tFound] = await Promise.all([qPromise, tPromise]);
@@ -2360,7 +2965,7 @@
         let bFound = b || "";
 
         if (!bFound && requestInfo.isBeatportRelevant) {
-          bFound = await beatportSearch(streamingArtistNames, title, requestInfo).catch(() => "");
+          bFound = await getBeatportLookup();
         }
 
         b = b || bFound || "";
@@ -2373,10 +2978,7 @@
         if (!b) {
           const dzRes = d
             ? { url: d, label: "Deezer" }
-            : await deezerSearch(streamingArtistNames, titleNoYear(title), requestInfo).catch(() => ({
-                url: "",
-                label: "Deezer"
-              }));
+            : await getDeezerLookup();
 
           d = d || dzRes.url || "";
           deezerLabel = dzRes.label || "Deezer";
@@ -2387,9 +2989,6 @@
           }
         }
       }
-
-      const fallbackTidalSearch = makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title));
-      const fallbackBeatportSearch = beatportSearchUrl(streamingArtistSearch, titleNoYear(title));
 
       if (!copied) {
         renderResults({
@@ -2420,6 +3019,8 @@
     } catch (e) {
       console.error("[RED Purchase Links] script error", e);
       showNotice("Script error (check console)", "#ff8a8a");
+    } finally {
+      logPerfSummary();
     }
   })();
 })();

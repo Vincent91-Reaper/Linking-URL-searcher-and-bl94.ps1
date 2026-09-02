@@ -1,3 +1,8 @@
+param(
+    [string]$InitialInput = $null,
+    [switch]$Once
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -15,6 +20,7 @@ $BruceleeUpBaseFlags = @('-s','WEB')
 # ---------------------------------------------------------------------------
 
 $script:IntroShown = $false
+$script:ResizeFlacArtworkExitCode = 0
 
 function Read-Bold {
     param([string]$Message)
@@ -219,7 +225,20 @@ function Brucelee-Upload {
 
 function Resize-FLAC-Artwork {
     param([string]$albumFolder)
-    python resize_flac_cover.py "$albumFolder"
+
+    $script:ResizeFlacArtworkExitCode = 0
+    $scriptDir = $PSScriptRoot
+    if (-not $scriptDir) { $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
+    $resizeScript = Join-Path $scriptDir 'resize_flac_cover.py'
+
+    if (-not (Test-Path -LiteralPath $resizeScript -PathType Leaf)) {
+        Write-Host "resize_flac_cover.py not found at $resizeScript. Aborting resize." -ForegroundColor Red
+        $script:ResizeFlacArtworkExitCode = 2
+        return
+    }
+
+    & python $resizeScript "$albumFolder"
+    $script:ResizeFlacArtworkExitCode = $LASTEXITCODE
 }
 
 function Run-UploadFlow {
@@ -233,11 +252,14 @@ function Run-UploadFlow {
     }
 
     if ($InitialInput) {
-        $input = $InitialInput
+        $linkInput = $InitialInput
+        # Replace ASCII control characters (0-31 and DEL) before display so copied multi-line or escape-sequence text stays on one safe console line.
+        $displayInput = $linkInput -replace '[\x00-\x1F\x7F]', '?'
+        Write-Host ("Using provided input (non-interactive): {0}" -f $displayInput) -ForegroundColor Cyan
     } else {
-        $input = Read-Bold 'Enter link or folder path'
+        $linkInput = Read-Bold 'Enter link or folder path'
     }
-    if (-not $input) { Write-Host 'No input provided. Aborting.' -ForegroundColor Red; return }
+    if (-not $linkInput) { Write-Host 'No input provided. Aborting.' -ForegroundColor Red; return }
 
     $albumFolder = $null
     $url = $null
@@ -247,30 +269,30 @@ function Run-UploadFlow {
     $shouldUpload = $false
 
     try {
-        if (Test-Path -LiteralPath $input -PathType Container) {
+        if (Test-Path -LiteralPath $linkInput -PathType Container) {
             $choice = '5'
-            $albumFolder = (Resolve-Path -LiteralPath $input).ProviderPath
+            $albumFolder = (Resolve-Path -LiteralPath $linkInput).ProviderPath
         }
     } catch {}
 
     if (-not $choice) {
-        if ($input -match '(?i)deezer') {
+        if ($linkInput -match '(?i)deezer') {
             $choice = '6'
-            $url = $input
+            $url = $linkInput
             $isDeezer = $true
-        } elseif ($input -match '(?i)qobuz') {
+        } elseif ($linkInput -match '(?i)qobuz') {
             $choice = '1'
-            $url = $input
+            $url = $linkInput
             $isQobuz = $true
-        } elseif ($input -match '(?i)beatport') {
+        } elseif ($linkInput -match '(?i)beatport') {
             $choice = '2'
-            $url = $input
-        } elseif ($input -match '(?i)music\.apple\.com|apple\.com') {
+            $url = $linkInput
+        } elseif ($linkInput -match '(?i)music\.apple\.com|apple\.com') {
             $choice = '3'
-            $url = $input
-        } elseif ($input -match '(?i)tidal|listen\.tidal') {
+            $url = $linkInput
+        } elseif ($linkInput -match '(?i)tidal|listen\.tidal') {
             $choice = '4'
-            $url = $input
+            $url = $linkInput
         } else {
             Write-Host 'Which tool do you want to use?' -ForegroundColor Yellow
             Write-Host '1 = Qobuz-cli (Qobuz only)' -ForegroundColor Yellow
@@ -351,7 +373,7 @@ function Run-UploadFlow {
             }
 
             Resize-FLAC-Artwork $albumFolder
-            $resizeExit = $LASTEXITCODE
+            $resizeExit = $script:ResizeFlacArtworkExitCode
             if ($resizeExit -ne 0) {
                 Write-Host "resize_flac_cover.py returned non-zero exit code $resizeExit. Aborting upload." -ForegroundColor Yellow
                 $shouldUpload = $false
@@ -474,13 +496,14 @@ node cli.js dl '$urlEscForBash' 2>&1 | tee /tmp/deemix-cli.run.log
     }
 }
 
-$nextInput = $null
+$nextInput = $InitialInput
 while ($true) {
     try {
         Run-UploadFlow -InitialInput $nextInput
     } catch {
         Write-Host 'Unhandled error:' $_ -ForegroundColor Red
     }
+    if ($Once) { break }
     $nextInput = Read-Bold 'Enter a folder path or URL'
     if (-not $nextInput) { break }
 }
