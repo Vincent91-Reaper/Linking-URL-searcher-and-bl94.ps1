@@ -732,7 +732,8 @@
         clickTimer = setTimeout(() => {
           try {
             GM.setClipboard(url, { type: "text/plain" });
-            notifyCopied(label, url, !bridgeAutomationLocked);
+            notifyCopied(label, url, false);
+            sendBridgeUrl(label, url, "manual-click", true);
             const copiedLine = resultPanel.querySelector("div:nth-child(1)");
             if (copiedLine) copiedLine.innerHTML = `<b>Copied:</b> ${esc(url)}`;
           } catch {

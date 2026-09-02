@@ -336,8 +336,7 @@ Write-Host ("Listening for RED Purchase Links first-panel URLs at {0}bridge-url"
 Write-Host 'The clipboard is ignored. Press Ctrl+C to stop.' -ForegroundColor Yellow
 
 try {
-    $stopRequested = $false
-    while (-not $stopRequested) {
+    while ($true) {
         try {
             if ($contextTask.AsyncWaitHandle.WaitOne($PollIntervalMs)) {
                 do {
@@ -393,11 +392,8 @@ try {
                 $activeBl94 = $null
                 $activeBridgeItem = $null
 
-                if ($exitCode -eq 0) {
-                    if ($queuedUrls.Count -gt 0) { $queuedUrls.Clear() }
-                    Write-Host "[Bridge] First URL run finished successfully. Stopping bridge." -ForegroundColor Green
-                    $stopRequested = $true
-                    continue
+                if ($exitCode -eq 0 -and $queuedUrls.Count -gt 0) {
+                    $queuedUrls.Clear()
                 }
             }
 
