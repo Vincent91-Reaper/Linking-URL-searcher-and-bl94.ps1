@@ -2851,6 +2851,20 @@
       }
 
       let copied = "";
+      const fallbackTidalSearch = makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title));
+      const fallbackBeatportSearch = beatportSearchUrl(streamingArtistSearch, titleNoYear(title));
+
+      renderResults({
+        copied: "",
+        release,
+        qobuz: q,
+        tidal: t,
+        tidalSearch: t ? "" : fallbackTidalSearch,
+        deezer: d,
+        deezerLabel,
+        beatport: b,
+        beatportSearch: b ? "" : fallbackBeatportSearch
+      });
 
       const qPromise = q
         ? Promise.resolve(q)
@@ -2860,7 +2874,34 @@
         ? Promise.resolve(t)
         : getTidalLookup().then((res) => res.exact || "");
 
-      void getDeezerLookup();
+      const dPromise = getDeezerLookup();
+      const bPromise = requestInfo.isBeatportRelevant ? getBeatportLookup() : Promise.resolve("");
+
+      void qPromise.then((found) => {
+        if (!found || q) return;
+        q = found;
+        updateRenderedState({ qobuz: q });
+      });
+
+      void tPromise.then((found) => {
+        if (!found || t) return;
+        t = found;
+        updateRenderedState({ tidal: t, tidalSearch: "" });
+      });
+
+      void dPromise.then((found) => {
+        const url = found?.url || "";
+        if (!url || d) return;
+        d = url;
+        deezerLabel = found?.label || "Deezer";
+        updateRenderedState({ deezer: d, deezerLabel });
+      });
+
+      void bPromise.then((found) => {
+        if (!found || b) return;
+        b = found;
+        updateRenderedState({ beatport: b, beatportSearch: "" });
+      });
 
       // Race Qobuz and Tidal first.
       const firstQT = await firstResolvedPurchaseUrl([
@@ -2871,6 +2912,18 @@
       if (firstQT.url) {
         copied = firstQT.url;
         copyNow(firstQT.label, firstQT.url);
+        if (firstQT.label === "Qobuz") q = firstQT.url;
+        if (firstQT.label === "Tidal") t = firstQT.url;
+        updateRenderedState({
+          copied,
+          qobuz: q,
+          tidal: t,
+          tidalSearch: t ? "" : fallbackTidalSearch,
+          deezer: d,
+          deezerLabel,
+          beatport: b,
+          beatportSearch: b ? "" : fallbackBeatportSearch
+        });
       }
 
       const [qFound, tFound] = await Promise.all([qPromise, tPromise]);
@@ -2907,9 +2960,6 @@
           }
         }
       }
-
-      const fallbackTidalSearch = makeTidalSearchUrl(streamingArtistSearch, titleNoYear(title));
-      const fallbackBeatportSearch = beatportSearchUrl(streamingArtistSearch, titleNoYear(title));
 
       if (!copied) {
         renderResults({
