@@ -60,8 +60,10 @@
   const SEARCH_PERSIST_PREFIX = "red_purchase_links_cache_v2:";
   const BL94_BRIDGE_ENDPOINT = "http://127.0.0.1:17894/bridge-url";
   const MIN_BOUNTY_BYTES = 200 * 1024 * 1024;
+  const STOP_AUTOMATION_AFTER_FIRST_BRIDGE_QUEUE = true;
   const bridgeFirstSeenAtByKey = new Map();
   const pendingBridgeBeacons = new Set();
+  let bridgeAutomationLocked = false;
 
   const PANEL_LEFT = "200px";
   const PANEL_TOP = "350px";
@@ -493,15 +495,22 @@
     return bridgeFirstSeenAtByKey.get(key) || new Date().toISOString();
   };
 
-  const notifyCopied = (serviceLabel, url) => {
+  const lockBridgeAutomation = (reason = "bridge-queued") => {
+    if (bridgeAutomationLocked) return;
+    bridgeAutomationLocked = true;
+    perfLog(`[bridge] automation locked (${reason})`);
+  };
+
+  const notifyCopied = (serviceLabel, url, sendToBridge = true) => {
     showNotice(
       `Copied ${esc(serviceLabel)} URL to clipboard<br><span style="font-size:14px;color:#ddd;font-weight:600;">${esc(url)}</span>`,
       "#7CFC90"
     );
-    sendBridgeUrl(serviceLabel, url, "copy-now");
+    if (sendToBridge) sendBridgeUrl(serviceLabel, url, "copy-now");
   };
 
-  const sendBridgeUrl = (serviceLabel, url, sendSource = "panel-render") => {
+  const sendBridgeUrl = (serviceLabel, url, sendSource = "panel-render", forceWhenLocked = false) => {
+    if (bridgeAutomationLocked && !forceWhenLocked) return;
     const normalizedUrl = String(url || "").trim();
     if (!normalizedUrl) return;
 
@@ -538,7 +547,18 @@
           headers: { "Content-Type": "application/json" },
           data: payloadText,
           timeout: 1500,
-          onload: () => {},
+          onload: (res) => {
+            if (!STOP_AUTOMATION_AFTER_FIRST_BRIDGE_QUEUE || bridgeAutomationLocked) return;
+            const body = String(res?.responseText || "").trim();
+            if (!body) return;
+            try {
+              const parsed = JSON.parse(body);
+              const status = String(parsed?.status || "").toLowerCase();
+              if (status === "queued" || status === "duplicate") {
+                lockBridgeAutomation("first-queued");
+              }
+            } catch {}
+          },
           onerror: () => {},
           ontimeout: () => {}
         });
@@ -568,9 +588,7 @@
         body: payloadText,
         keepalive: true
       })
-        .then(() => {
-          gmFallbackDispatched = true;
-        })
+        .then(() => {})
         .catch(() => {
           dispatchGmFallback();
         });
@@ -579,12 +597,16 @@
     }
   };
 
-  const copyNow = (serviceLabel, url) => {
+  const copyNow = (serviceLabel, url, sendToBridge = true) => {
+    if (sendToBridge && bridgeAutomationLocked) return false;
     if (!url) return false;
 
     try {
       GM.setClipboard(url, { type: "text/plain" });
-      notifyCopied(serviceLabel, url);
+      notifyCopied(serviceLabel, url, sendToBridge);
+      if (sendToBridge && STOP_AUTOMATION_AFTER_FIRST_BRIDGE_QUEUE) {
+        lockBridgeAutomation("first-copy");
+      }
       return true;
     } catch {
       showNotice("Failed to copy URL to clipboard", "#ff8a8a");
@@ -625,6 +647,7 @@
   const bridgePanelSentKeys = new Set();
 
   const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
+    if (bridgeAutomationLocked) return;
     const candidates = [
       ["Qobuz", qobuz],
       ["Tidal", tidal],
@@ -709,7 +732,7 @@
         clickTimer = setTimeout(() => {
           try {
             GM.setClipboard(url, { type: "text/plain" });
-            notifyCopied(label, url);
+            notifyCopied(label, url, !bridgeAutomationLocked);
             const copiedLine = resultPanel.querySelector("div:nth-child(1)");
             if (copiedLine) copiedLine.innerHTML = `<b>Copied:</b> ${esc(url)}`;
           } catch {
@@ -2537,27 +2560,32 @@
       };
 
       const warmMissingResultsInBackground = (state) => {
+        if (bridgeAutomationLocked) return;
         const snapshot = { ...(state || {}) };
         if (!snapshot.qobuz) {
           void getQobuzLookup().then((value) => {
+            if (bridgeAutomationLocked) return;
             if (!value) return;
             updateRenderedState({ qobuz: value });
           });
         }
         if (!snapshot.tidal) {
           void getTidalLookup().then((res) => {
+            if (bridgeAutomationLocked) return;
             if (res?.exact) updateRenderedState({ tidal: res.exact, tidalSearch: "" });
             else if (res?.search) updateRenderedState({ tidalSearch: res.search });
           });
         }
         if (!snapshot.deezer) {
           void getDeezerLookup().then((res) => {
+            if (bridgeAutomationLocked) return;
             if (!res?.url) return;
             updateRenderedState({ deezer: res.url, deezerLabel: res.label || "Deezer" });
           });
         }
         if (requestInfo.isBeatportRelevant && !snapshot.beatport) {
           void getBeatportLookup().then((value) => {
+            if (bridgeAutomationLocked) return;
             if (!value) return;
             updateRenderedState({ beatport: value, beatportSearch: "" });
           });
@@ -2604,12 +2632,8 @@
                   : service === "deezer" ? { deezer: foundUrl, deezerLabel: nextDeezerLabel }
                     : { beatport: foundUrl };
 
-            const copiedLabel = service === "deezer" ? nextDeezerLabel : rowLabel;
-            copyNow(copiedLabel, foundUrl);
-
             updateRenderedState({
               ...servicePatch,
-              copied: foundUrl,
               serviceStatus: { [service]: "" }
             });
             return;
@@ -2878,18 +2902,21 @@
       const bPromise = requestInfo.isBeatportRelevant ? getBeatportLookup() : Promise.resolve("");
 
       void qPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
         if (!found || q) return;
         q = found;
         updateRenderedState({ qobuz: q });
       });
 
       void tPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
         if (!found || t) return;
         t = found;
         updateRenderedState({ tidal: t, tidalSearch: "" });
       });
 
       void dPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
         const url = found?.url || "";
         if (!url || d) return;
         d = url;
@@ -2898,6 +2925,7 @@
       });
 
       void bPromise.then((found) => {
+        if (bridgeAutomationLocked) return;
         if (!found || b) return;
         b = found;
         updateRenderedState({ beatport: b, beatportSearch: "" });
