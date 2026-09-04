@@ -644,26 +644,6 @@
 
   let lastRenderState = { ...DEFAULT_RENDER_STATE };
   let onDemandLabelSearch = null;
-  const bridgePanelSentKeys = new Set();
-
-  const sendFirstPanelUrlsToBridge = ({ qobuz = "", tidal = "", deezer = "", deezerLabel = "Deezer", beatport = "" }) => {
-    if (bridgeAutomationLocked) return;
-    const candidates = [
-      ["Qobuz", qobuz],
-      ["Tidal", tidal],
-      [deezerLabel || "Deezer", deezer],
-      ["Beatport", beatport]
-    ];
-
-    for (const [label, candidateUrl] of candidates) {
-      const normalizedUrl = String(candidateUrl || "").trim();
-      if (!normalizedUrl) continue;
-      const key = `${label}\u0000${normalizedUrl}`;
-      if (bridgePanelSentKeys.has(key)) continue;
-      bridgePanelSentKeys.add(key);
-      sendBridgeUrl(label, normalizedUrl, "panel-render");
-    }
-  };
 
   const renderResults = ({ release = "", qobuz = "", tidal = "", tidalSearch = "", deezer = "", deezerLabel = "Deezer", beatport = "", beatportSearch = "", copied = "", serviceStatus = {} }) => {
     lastRenderState = {
@@ -678,8 +658,6 @@
       copied,
       serviceStatus: { ...(serviceStatus || {}) }
     };
-
-    sendFirstPanelUrlsToBridge({ qobuz, tidal, deezer, deezerLabel, beatport });
 
     const row = (label, url, serviceKey = "", statusText = "") => {
       const style = brandStyleByLabel(label);
@@ -2653,8 +2631,6 @@
       let q = desc.qobuz, t = desc.tidal, d = desc.deezer, b = desc.beatport;
       let deezerLabel = "Deezer";
       const count = [q, t, d, b].filter(Boolean).length;
-
-      sendFirstPanelUrlsToBridge({ qobuz: q, tidal: t, deezer: d, deezerLabel, beatport: b });
 
       // Description Beatport links trump all other logic.
       // If the RED request description already contains a Beatport URL,
